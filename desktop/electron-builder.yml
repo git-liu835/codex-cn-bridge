@@ -2,6 +2,12 @@ appId: com.code-cn-bridge.app
 productName: code CN Bridge
 copyright: MIT
 
+publish:
+  provider: github
+  owner: git-liu835
+  repo: code-cn-bridge
+  releaseType: release
+
 directories:
   output: release
   buildResources: assets

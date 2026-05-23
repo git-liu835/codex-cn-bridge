@@ -13,4 +13,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onBridgeLog: (callback: (log: any) => void) => {
     ipcRenderer.on('bridge-log', (_event, log) => callback(log));
   },
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  onUpdateStatus: (callback: (status: any) => void) => {
+    ipcRenderer.on('update-status', (_event, status) => callback(status));
+  },
 });

@@ -1,7 +1,12 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, shell } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import { spawn, execSync, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+
+// 禁用自动下载，由用户决定是否更新
+autoUpdater.autoDownload = false;
+autoUpdater.allowDowngrade = false;
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -348,6 +353,87 @@ ipcMain.handle('open-external', async (_event, url: string) => {
   await shell.openExternal(url);
 });
 
+ipcMain.handle('check-for-updates', async () => {
+  if (isDev) return { status: 'dev-mode' };
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return { status: 'ok', version: result?.updateInfo?.version };
+  } catch (err: any) {
+    return { status: 'error', message: err.message };
+  }
+});
+
+ipcMain.handle('get-app-version', async () => {
+  return app.getVersion();
+});
+
+// ── 自动更新 ───────────────────────────────────────────────────────
+
+function setupAutoUpdater() {
+  if (isDev) {
+    console.log('[AutoUpdater] Skipping update check in dev mode');
+    return;
+  }
+
+  autoUpdater.on('update-available', (info) => {
+    console.log('[AutoUpdater] Update available:', info.version);
+    dialog.showMessageBox(mainWindow!, {
+      type: 'info',
+      title: '发现新版本',
+      message: `新版本 v${info.version} 可用`,
+      detail: `当前版本: v${app.getVersion()}\n\n是否立即下载更新？`,
+      buttons: ['立即更新', '稍后提醒'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0) {
+        autoUpdater.downloadUpdate();
+        mainWindow?.webContents.send('update-status', { status: 'downloading' });
+      }
+    });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    mainWindow?.webContents.send('update-status', {
+      status: 'downloading',
+      percent: Math.floor(progress.percent),
+    });
+  });
+
+  autoUpdater.on('update-downloaded', () => {
+    mainWindow?.webContents.send('update-status', { status: 'downloaded' });
+    dialog.showMessageBox(mainWindow!, {
+      type: 'info',
+      title: '更新已下载',
+      message: '更新已下载完成，是否立即退出并安装？',
+      detail: '安装完成后程序将自动重启。',
+      buttons: ['退出并安装', '稍后安装'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0) {
+        autoUpdater.quitAndInstall();
+      }
+    });
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    mainWindow?.webContents.send('update-status', { status: 'up-to-date' });
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('[AutoUpdater] Error:', err.message);
+    mainWindow?.webContents.send('update-status', { status: 'error', message: err.message });
+  });
+
+  // 延迟检查，让应用先启动完成
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((err) => {
+      console.error('[AutoUpdater] Check failed:', err.message);
+    });
+  }, 5000);
+}
+
 // ── App Lifecycle ────────────────────────────────────────────────────
 
 function getCloseToTraySetting(): boolean {
@@ -375,6 +461,7 @@ function getAutoStartSetting(): boolean {
 app.whenReady().then(() => {
   createTray();
   createWindow();
+  setupAutoUpdater();
   if (getAutoStartSetting()) {
     startBridgeProcess();
   } else {

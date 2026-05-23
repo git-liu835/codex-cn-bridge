@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.3.4 (2026-05-23)
+
+### Features
+
+- **自动更新**: 启动时自动检查 GitHub Releases 更新，弹窗提示用户选择是否下载更新
+- **手动检查更新**: About 页面添加「检查更新」按钮，可随时检查新版本
+- **更新流程用户可控**: 每步均由用户决定（立即更新/稍后提醒 → 退出并安装/稍后安装），不自动下载
+
+### Improvements
+
+- **About 页面**: 版本号动态获取，修复 GitHub 链接为正确仓库地址
+
+### Commits
+
+- `(pending)` — feat: add auto-update with user-choice dialogs
+
 ## v0.3.3 (2026-05-23)
 
 ### Bug Fixes

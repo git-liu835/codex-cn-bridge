@@ -11,6 +11,9 @@ declare global {
       openExternal: (url: string) => Promise<void>;
       onBridgeStatus: (callback: (status: any) => void) => void;
       onBridgeLog: (callback: (log: any) => void) => void;
+      checkForUpdates: () => Promise<{ status: string; version?: string; message?: string }>;
+      getAppVersion: () => Promise<string>;
+      onUpdateStatus: (callback: (status: any) => void) => void;
     };
   }
 }

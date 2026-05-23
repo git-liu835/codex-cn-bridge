@@ -1,6 +1,6 @@
 {
   "name": "code-cn-bridge-desktop",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "code CN Bridge Desktop - 国产模型本地代理桌面管理工具",
   "author": "git-liu835 <git-liu835@users.noreply.github.com>",
   "homepage": "https://github.com/git-liu835/code-cn-bridge",
@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "electron-updater": "^6.8.3",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-router-dom": "^6.23.0"
