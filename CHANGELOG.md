@@ -1,0 +1,34 @@
+# Changelog
+
+## v0.3.3 (2026-05-23)
+
+### Bug Fixes
+
+- **托盘图标空白**: 托盘图标从空白透明图改为加载 `assets/icon.png` 真实图标，按平台缩放（Win 16px, Mac 44px）
+- **多个托盘图标残留**: 添加 `app.requestSingleInstanceLock()` 单实例锁，重复启动时激活已有窗口；退出时 `tray.destroy()` 清理托盘
+- **electron-builder**: 添加 `icon.png` 到 `extraResources`，确保生产构建包含图标文件
+
+### Commits
+
+- `a31c4f4` — fix: prevent multiple blank tray icons on Windows
+- `77376f8` — fix: prevent dangling tool_calls causing upstream 400 error
+
+## v0.3.2 (2026-05-23)
+
+### Bug Fixes
+
+- **工具调用报 400 错误**: 修复 `protocol.py` 中 `_map_input_to_messages()` 的 `_flush_tool_calls()` 逻辑。当某些 `function_call` 项缺少对应的 `function_call_output` 响应时（多轮工具调用、历史截断等场景），不再创建尾部没有 `tool` message 跟随的 `assistant` 消息，避免上游 API（DeepSeek 等）返回 `"An assistant message with 'tool_calls' must be followed by tool messages"` 错误
+
+### Commits
+
+- `77376f8` — fix: prevent dangling tool_calls causing upstream 400 error
+
+## v0.3.1 (2026-05-23)
+
+### Bug Fixes
+
+- **模型配置重启丢失**: 修复 `config.py` 中首次启动无配置文件时 `_config_path` 为 `None` 导致 `save()` 静默跳过的问题。现在 `_config_path` 默认指向 `~/.code-cn-bridge.yaml`，首次保存时自动创建
+
+### Commits
+
+- `7bbdb19` — fix: persist model configs when no config file exists on first launch
