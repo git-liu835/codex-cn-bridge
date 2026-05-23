@@ -66,7 +66,10 @@ class Config:
                 self._config_path = path
                 self._data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         else:
-            self._data = {}
+            with self._lock:
+                # 即使文件不存在，也记录默认路径，确保后续 save() 能写入
+                self._config_path = path or (Path.home() / ".code-cn-bridge.yaml")
+                self._data = {}
         self._inject_env()
 
     def reload(self) -> None:
@@ -77,6 +80,7 @@ class Config:
         """保存当前配置到文件"""
         with self._lock:
             if self._config_path:
+                self._config_path.parent.mkdir(parents=True, exist_ok=True)
                 data = self._data.copy()
                 # 仅移除来自环境变量的 api_key（有 api_key_env 的），保留直接配置的
                 env_api_keys = {}
