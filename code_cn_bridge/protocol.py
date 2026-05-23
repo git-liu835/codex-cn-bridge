@@ -102,21 +102,30 @@ def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
     messages = []
     pending_tool_calls: list[dict] = []  # 收集连续的 function_call
     pending_reasoning: str = ""  # 收集 reasoning 文本，附加到紧随的 assistant 消息
+    responded_call_ids: set = set()  # 跟踪已有 function_call_output 响应的 call_id
 
     def _flush_tool_calls():
-        """提交收集中的 tool_calls，附带 reasoning_content（Kimi 等 thinking 模型需要）"""
+        """提交收集中的 tool_calls，附带 reasoning_content（Kimi 等 thinking 模型需要）
+
+        只提交已收到对应 function_call_output 的 tool_calls，防止创建后面没有
+        tool message 跟随的 assistant 消息导致上游 400 错误。
+        """
         nonlocal pending_reasoning
         if pending_tool_calls:
-            msg = {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": pending_tool_calls.copy(),
-            }
-            # Kimi thinking 模型要求所有带 tool_calls 的 assistant 消息必须有 reasoning_content
-            msg["reasoning_content"] = pending_reasoning or "Tool calls."
-            pending_reasoning = ""
-            messages.append(msg)
-            pending_tool_calls.clear()
+            # 分离已解决和未解决的 tool_calls
+            resolved = [tc for tc in pending_tool_calls if tc["id"] in responded_call_ids]
+            if resolved:
+                msg = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": resolved,
+                }
+                # Kimi thinking 模型要求所有带 tool_calls 的 assistant 消息必须有 reasoning_content
+                msg["reasoning_content"] = pending_reasoning or "Tool calls."
+                pending_reasoning = ""
+                messages.append(msg)
+            # 移除已解决的，保留未解决的等待后续 output
+            pending_tool_calls[:] = [tc for tc in pending_tool_calls if tc["id"] not in responded_call_ids]
 
     for item in input_items:
         item_type = item.get("type", "")
@@ -128,6 +137,8 @@ def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
 
         # function_call_output → tool role (工具调用结果)
         if item_type == "function_call_output":
+            call_id = item.get("call_id", "")
+            responded_call_ids.add(call_id)
             _flush_tool_calls()
 
             # output 可能是字符串或结构化的 output_text 列表
@@ -139,7 +150,7 @@ def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": item.get("call_id", ""),
+                "tool_call_id": call_id,
                 "content": output,
             })
             continue
@@ -182,7 +193,7 @@ def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
 
         messages.append(msg)
 
-    # 末尾如果还有未提交的 tool_calls
+    # 末尾如果还有未提交的 tool_calls（_flush_tool_calls 内部会过滤未解决的）
     _flush_tool_calls()
 
     # 末尾如果还有未消费的 reasoning（极少情况，附加到最后一个 assistant 消息）
