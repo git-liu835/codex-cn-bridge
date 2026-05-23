@@ -13,6 +13,8 @@ files:
 extraResources:
   - from: ../dist-backend/
     to: backend/
+  - from: assets/icon.png
+    to: icon.png
 
 mac:
   target:

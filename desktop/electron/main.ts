@@ -13,6 +13,22 @@ const MAX_RESTART = 5;
 const BRIDGE_PORT = 8765;
 const isDev = !app.isPackaged;
 
+// ── 单实例锁（防止多个托盘图标）──────────────────────────────────────
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    // 用户再次启动时，激活已有窗口而不是创建新实例
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+
+  // ── 以下所有初始化仅在主实例中执行 ───────────────────────────────
+
 function findConfigPath(): string | null {
   // 优先找项目根目录的 config.yaml（适合开发模式）
   const projectConfig = path.join(__dirname, '..', '..', 'config.yaml');
@@ -182,8 +198,21 @@ function createWindow() {
 }
 
 function createTray() {
-  // 创建 16x16 托盘图标
-  const icon = nativeImage.createEmpty();
+  // 加载真实的图标文件（而非 createEmpty 导致的空白图标）
+  let icon = nativeImage.createEmpty();
+  try {
+    const iconPath = isDev
+      ? path.join(__dirname, '..', 'assets', 'icon.png')
+      : path.join(process.resourcesPath, 'icon.png');
+    if (fs.existsSync(iconPath)) {
+      icon = nativeImage.createFromPath(iconPath);
+      // 托盘图标大小：Windows 16x16, macOS 22x22 (2x retina)
+      const traySize = process.platform === 'darwin' ? 44 : 16;
+      icon = icon.resize({ width: traySize, height: traySize });
+    }
+  } catch {
+    // 加载失败则保持空图标（至少不会崩溃）
+  }
   tray = new Tray(icon);
 
   // 使用自定义标题
@@ -368,8 +397,19 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   isQuitting = true;
   stopBridgeProcess();
+  // 销毁托盘图标，防止残留空白图标
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
 });
 
 app.on('quit', () => {
   stopBridgeProcess();
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
 });
+
+} // else (gotTheLock) — 主实例初始化结束
