@@ -96,55 +96,67 @@ jobs:
 
       - run: ls -la artifacts/
 
-      # 合并各平台的 latest-*.yml 为统一的 latest.yml
+      # 合并各平台的 latest-*.yml 为统一的 latest.yml，并重新计算 SHA512
       - name: Merge platform latest.yml
         run: |
           python3 -c "
-          import os, re
+          import os, hashlib, base64
           from datetime import datetime, timezone
 
           artifacts = 'artifacts'
           ymls = sorted(f for f in os.listdir(artifacts) if f.startswith('latest-') and f.endswith('.yml'))
 
-          all_files = []
+          # 从各平台 yml 提取 url 列表（保持原始排序）
+          file_urls = []  # list of (url, source_yml)
           version = ''
-          primary_path = ''
-          primary_sha = ''
-
           for yml in ymls:
               with open(os.path.join(artifacts, yml), 'r') as fh:
                   content = fh.read()
-
               if not version:
+                  import re
                   m = re.search(r'^version:\s*(.+)', content, re.M)
                   if m: version = m.group(1).strip()
-
-              # 提取 files 数组块
-              files_block = re.search(r'^files:\s*\n((?:\s+-\s+url:.*\n(?:\s+sha512:.*\n)?(?:\s+size:.*\n)?)+)', content, re.M)
-              if files_block:
-                  all_files.append(files_block.group(1).rstrip())
-
-              # Windows 的作为主 path
-              if 'windows' in yml or 'win' in yml:
-                  m = re.search(r'^path:\s*(.+)', content, re.M)
-                  if m: primary_path = m.group(1).strip()
-                  m = re.search(r'^sha512:\s*(.+)', content, re.M)
-                  if m: primary_sha = m.group(1).strip()
-
-          if not primary_path and ymls:
-              # 回退：从 files 里找 exe
-              for fblock in all_files:
-                  m = re.search(r'url:\s*(\S+\.exe)', fblock)
+              # 提取 files 数组中的 url
+              for line in content.split('\n'):
+                  m = re.match(r'\s+- url:\s*(\S+)', line)
                   if m:
-                      primary_path = m.group(1).strip()
-                      break
+                      url = m.group(1).strip()
+                      if not any(u == url for u, _ in file_urls):
+                          file_urls.append((url, yml))
 
-          # 写入合并后的 latest.yml
+          # 直接计算每个安装包文件的 SHA512（不依赖 yml 里的旧 hash）
+          file_entries = []
+          primary_sha = ''
+          primary_path = ''
+          for url, src_yml in file_urls:
+              filepath = os.path.join(artifacts, url)
+              if not os.path.exists(filepath):
+                  print(f'WARNING: {url} not found in artifacts, skipping')
+                  continue
+              size = os.path.getsize(filepath)
+              sha = hashlib.sha512()
+              with open(filepath, 'rb') as fh:
+                  while True:
+                      chunk = fh.read(8192)
+                      if not chunk: break
+                      sha.update(chunk)
+              sha_b64 = base64.b64encode(sha.digest()).decode('ascii')
+              file_entries.append(f'  - url: {url}\n    sha512: {sha_b64}\n    size: {size}')
+              print(f'{url}: size={size} sha512={sha_b64}')
+              # Windows exe 作为主 path
+              if url.endswith('.exe'):
+                  primary_path = url
+                  primary_sha = sha_b64
+
+          if not primary_path and file_urls:
+              primary_path = file_urls[0][0]
+
+          # 写入 latest.yml
           with open(os.path.join(artifacts, 'latest.yml'), 'w') as fh:
               fh.write(f'version: {version}\n')
               fh.write('files:\n')
-              for block in all_files:
-                  fh.write(block + '\n')
+              for entry in file_entries:
+                  fh.write(entry + '\n')
               if primary_path:
                   fh.write(f'path: {primary_path}\n')
                   fh.write(f'sha512: {primary_sha}\n')
