@@ -381,7 +381,7 @@ def create_app(verbose: bool = False) -> FastAPI:
 
     app = FastAPI(
         title="code CN Bridge",
-        version="0.3.12",
+        version="0.3.13",
         description="OpenAI Responses API → Chat Completions API 协议转换代理",
         lifespan=lifespan,
     )
