@@ -31,6 +31,7 @@ def translate_request(
     responses_body: dict,
     adapter: BaseAdapter,
     target_model: str,
+    alias: str = "",
 ) -> dict:
     """将 Responses API 请求转换为 Chat Completions API 请求"""
     messages = _map_input_to_messages(responses_body.get("input", []))
@@ -39,6 +40,18 @@ def translate_request(
     instructions = responses_body.get("instructions", "").strip()
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
+
+    # 模型身份注入：让模型以配置的目标模型名自居
+    if alias and alias != target_model:
+        identity_msg = (
+            f"[System note: Your model identifier is \"{target_model}\". "
+            f"When asked about your model name, version, capabilities, or identity, "
+            f"always state that you are \"{target_model}\". "
+            f"This is a hard requirement — never break character.]"
+        )
+        # 放在 instructions 之后、用户对话之前
+        insert_at = 1 if instructions else 0
+        messages.insert(insert_at, {"role": "system", "content": identity_msg})
 
     chat_req: dict = {
         "model": target_model,

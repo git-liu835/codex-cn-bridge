@@ -471,7 +471,7 @@ def create_app(verbose: bool = False) -> FastAPI:
         try:
             # 1. 协议转换: Responses → Chat
             cfg = get_config()
-            chat_req = translate_request(body, adapter, target_model)
+            chat_req = translate_request(body, adapter, target_model, alias=model)
             has_image_gen = chat_req.pop("_has_image_gen", False)
 
             # image_gen 内置工具：不转发给 LLM，直接在 bridge 内处理
