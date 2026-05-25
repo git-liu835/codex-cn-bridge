@@ -1,14 +1,19 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { api } from '../services/api';
 
 const About: React.FC = () => {
-  const [appVersion, setAppVersion] = useState('0.3.3');
+  const [appVersion, setAppVersion] = useState('0.3.5');
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const [configPath, setConfigPath] = useState('');
 
   useEffect(() => {
     window.electronAPI?.getAppVersion().then(v => {
       if (v) setAppVersion(v);
     });
+    api.getSettings().then(s => {
+      if (s.config_path) setConfigPath(s.config_path);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -66,9 +71,27 @@ const About: React.FC = () => {
             {checking ? '检查中...' : '检查更新'}
           </button>
           {updateStatus && (
-            <span style={{ marginLeft: 12, fontSize: 13, color: 'var(--text-secondary)' }}>
-              {updateStatus}
-            </span>
+            <div style={{ marginTop: 8, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+              <code style={{
+                flex: 1, padding: '8px 12px', fontSize: 13,
+                background: 'var(--bg-card)', border: '1px solid var(--border)',
+                borderRadius: 'var(--radius)', whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all', userSelect: 'text',
+                color: 'var(--text-secondary)',
+              }}>
+                {updateStatus}
+              </code>
+              <button
+                className="btn btn-sm"
+                onClick={() => {
+                  navigator.clipboard.writeText(updateStatus).catch(() => {});
+                }}
+                title="复制日志"
+                style={{ flexShrink: 0 }}
+              >
+                复制
+              </button>
+            </div>
           )}
         </div>
 
@@ -103,7 +126,19 @@ const About: React.FC = () => {
           </a>
         </div>
 
-        <p className="muted" style={{ marginTop: 16 }}>
+        {configPath && (
+          <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>配置路径:</span>
+            <code style={{
+              padding: '2px 8px', fontSize: 12, background: 'var(--bg-card)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+              userSelect: 'text',
+            }}>
+              {configPath}
+            </code>
+          </div>
+        )}
+        <p className="muted" style={{ marginTop: configPath ? 8 : 16 }}>
           License: MIT | Built with Electron + React + FastAPI
         </p>
       </div>

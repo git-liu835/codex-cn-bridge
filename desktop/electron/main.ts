@@ -359,7 +359,9 @@ ipcMain.handle('check-for-updates', async () => {
     const result = await autoUpdater.checkForUpdates();
     return { status: 'ok', version: result?.updateInfo?.version };
   } catch (err: any) {
-    return { status: 'error', message: err.message };
+    const detail = [err.message || String(err)];
+    if (err.stack) detail.push('Stack: ' + err.stack);
+    return { status: 'error', message: detail.join('\n') };
   }
 });
 
@@ -423,13 +425,18 @@ function setupAutoUpdater() {
 
   autoUpdater.on('error', (err) => {
     console.error('[AutoUpdater] Error:', err.message);
-    mainWindow?.webContents.send('update-status', { status: 'error', message: err.message });
+    const detail = [err.message];
+    if ((err as any).stack) detail.push('Stack: ' + (err as any).stack);
+    mainWindow?.webContents.send('update-status', { status: 'error', message: detail.join('\n') });
   });
 
   // 延迟检查，让应用先启动完成
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch((err) => {
       console.error('[AutoUpdater] Check failed:', err.message);
+      const detail = [err.message];
+      if ((err as any).stack) detail.push('Stack: ' + (err as any).stack);
+      mainWindow?.webContents.send('update-status', { status: 'error', message: detail.join('\n') });
     });
   }, 5000);
 }

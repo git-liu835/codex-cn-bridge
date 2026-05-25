@@ -77,7 +77,7 @@ class Config:
         self.load(self._config_path)
 
     def save(self) -> None:
-        """保存当前配置到文件"""
+        """保存当前配置到文件（原子写入，防止中途崩溃导致配置文件损坏）"""
         with self._lock:
             if self._config_path:
                 self._config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,10 +87,11 @@ class Config:
                 for name, info in data.get("providers", {}).items():
                     if "api_key" in info and info.get("api_key_env", ""):
                         env_api_keys[name] = info.pop("api_key")
-                self._config_path.write_text(
-                    yaml.dump(data, allow_unicode=True, default_flow_style=False),
-                    encoding="utf-8",
-                )
+                yaml_str = yaml.dump(data, allow_unicode=True, default_flow_style=False)
+                # 原子写入：先写临时文件，再 rename 替换（同分区内 rename 是原子的）
+                tmp_path = self._config_path.with_suffix(".tmp")
+                tmp_path.write_text(yaml_str, encoding="utf-8")
+                tmp_path.replace(self._config_path)
                 # 恢复 api_key
                 for name, key in env_api_keys.items():
                     data["providers"][name]["api_key"] = key
