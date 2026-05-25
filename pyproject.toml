@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-cn-bridge"
-version = "0.3.6"
+version = "0.3.7"
 description = "本地代理工具，将 OpenAI Responses API 转换为 Chat Completions API，使 code CLI 无缝接入国产大模型"
 readme = "README.md"
 license = {text = "MIT"}
