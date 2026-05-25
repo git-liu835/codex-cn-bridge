@@ -25,12 +25,14 @@ extraResources:
 mac:
   target:
     - dmg
+  artifactName: "code-CN-Bridge-${version}.${ext}"
   icon: assets/icon.icns
 
 linux:
   target:
     - AppImage
     - deb
+  artifactName: "code-CN-Bridge-${version}.${ext}"
   icon: assets/icon.png
   category: Utility
   maintainer: git-liu835
@@ -45,5 +47,6 @@ win:
   target:
     - nsis
     - portable
+  artifactName: "code-CN-Bridge-Setup-${version}.${ext}"
   icon: assets/icon.ico
   signAndEditExecutable: false

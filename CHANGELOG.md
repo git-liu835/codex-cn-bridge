@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.8 (2026-05-26)
+
+### Bug Fixes
+
+- **安装包下载 404**: 添加显式 `artifactName` 模板，修复 `productName` 含空格导致 `latest.yml` 文件名与实际发布文件不匹配的问题
+
+## v0.3.7 (2026-05-26)
+
+### Features
+
+- **更新镜像支持**: About 页面新增镜像 URL 配置，解决国内访问 GitHub 超时问题。通过镜像 API 获取最新 release 信息，再用 generic provider 下载安装包
+
 ## v0.3.6 (2026-05-25)
 
 ### Bug Fixes
