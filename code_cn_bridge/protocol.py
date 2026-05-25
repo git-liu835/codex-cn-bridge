@@ -41,17 +41,6 @@ def translate_request(
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
 
-    # 模型身份注入：追加到 instructions，避免双 system 消息兼容问题
-    if alias and alias != target_model:
-        identity_note = (
-            f"\n\n---\n[ Identity: your designated name for this session is \"{target_model}\". "
-            f"If asked what model you are, reply with \"{target_model}\". ]"
-        )
-        if instructions:
-            messages[0]["content"] = instructions + identity_note
-        else:
-            messages.insert(0, {"role": "system", "content": identity_note.strip()})
-
     chat_req: dict = {
         "model": target_model,
         "messages": messages,
