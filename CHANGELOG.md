@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.12 (2026-05-26)
+
+### Bug Fixes
+
+- **SHA512 再次修复**: release job 直接重新计算安装包 SHA512，不再依赖 electron-builder 记录的旧 hash，消除 artifact 传输过程造成的校验差异
+
 ## v0.3.11 (2026-05-26)
 
 ### Bug Fixes
