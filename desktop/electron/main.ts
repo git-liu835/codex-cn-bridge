@@ -356,11 +356,21 @@ ipcMain.handle('open-external', async (_event, url: string) => {
 ipcMain.handle('check-for-updates', async () => {
   if (isDev) return { status: 'dev-mode' };
   try {
+    const mirror = getUpdateMirror();
+    if (mirror) {
+      const ok = await configureMirror(mirror);
+      if (!ok) {
+        return { status: 'error', message: '镜像连接失败，请检查镜像地址' };
+      }
+    }
     const result = await autoUpdater.checkForUpdates();
     return { status: 'ok', version: result?.updateInfo?.version };
   } catch (err: any) {
     const detail = [err.message || String(err)];
     if (err.stack) detail.push('Stack: ' + err.stack);
+    if (detail[0].includes('TIMED_OUT') || detail[0].includes('CONNECTION')) {
+      detail.push('提示：如在中国大陆，请设置更新镜像 (ghproxy.com)');
+    }
     return { status: 'error', message: detail.join('\n') };
   }
 });
@@ -368,6 +378,52 @@ ipcMain.handle('check-for-updates', async () => {
 ipcMain.handle('get-app-version', async () => {
   return app.getVersion();
 });
+
+// ── 更新镜像 ──────────────────────────────────────────────────────
+
+function getUpdateMirror(): string {
+  const configPath = findConfigPath();
+  if (!configPath) return '';
+  try {
+    const content = fs.readFileSync(configPath, 'utf-8');
+    const match = content.match(/^\s*update_mirror:\s*["']?([^"'\n\r]+)["']?\s*$/m);
+    if (match) return match[1].trim();
+  } catch { /* ignore */ }
+  return '';
+}
+
+async function configureMirror(mirror: string): Promise<boolean> {
+  const https = require('https');
+  const apiUrl = mirror.replace(/\/?$/, '') +
+    '/https://api.github.com/repos/git-liu835/codex-cn-bridge/releases/latest';
+
+  return new Promise((resolve) => {
+    const req = https.get(apiUrl, { timeout: 30000 }, (res: any) => {
+      let body = '';
+      res.on('data', (chunk: string) => { body += chunk; });
+      res.on('end', () => {
+        try {
+          const release = JSON.parse(body);
+          const tag: string = release.tag_name;
+          const baseUrl = mirror.replace(/\/?$/, '') +
+            '/https://github.com/git-liu835/codex-cn-bridge/releases/download/' + tag;
+          console.log('[AutoUpdater] Mirror configured:', baseUrl);
+          // @ts-ignore — generic provider URL
+          autoUpdater.setFeedURL({ provider: 'generic', url: baseUrl });
+          resolve(true);
+        } catch (e: any) {
+          console.error('[AutoUpdater] Mirror parse failed:', e.message);
+          resolve(false);
+        }
+      });
+    });
+    req.on('error', (e: any) => {
+      console.error('[AutoUpdater] Mirror fetch failed:', e.message);
+      resolve(false);
+    });
+    req.setTimeout(30000, () => { req.destroy(); resolve(false); });
+  });
+}
 
 // ── 自动更新 ───────────────────────────────────────────────────────
 
@@ -431,13 +487,29 @@ function setupAutoUpdater() {
   });
 
   // 延迟检查，让应用先启动完成
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((err) => {
+  setTimeout(async () => {
+    try {
+      const mirror = getUpdateMirror();
+      if (mirror) {
+        const ok = await configureMirror(mirror);
+        if (!ok) {
+          mainWindow?.webContents.send('update-status', {
+            status: 'error',
+            message: `镜像连接失败: ${mirror}\n请检查镜像地址是否正确，或清除镜像后重试。`,
+          });
+          return;
+        }
+      }
+      await autoUpdater.checkForUpdates();
+    } catch (err: any) {
       console.error('[AutoUpdater] Check failed:', err.message);
       const detail = [err.message];
       if ((err as any).stack) detail.push('Stack: ' + (err as any).stack);
+      if (detail[0].includes('TIMED_OUT') || detail[0].includes('CONNECTION')) {
+        detail.push('\n提示：如在中国大陆，请设置更新镜像 (ghproxy.com)');
+      }
       mainWindow?.webContents.send('update-status', { status: 'error', message: detail.join('\n') });
-    });
+    }
   }, 5000);
 }
 

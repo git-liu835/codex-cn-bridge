@@ -2,10 +2,11 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 
 const About: React.FC = () => {
-  const [appVersion, setAppVersion] = useState('0.3.5');
+  const [appVersion, setAppVersion] = useState('0.3.6');
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [configPath, setConfigPath] = useState('');
+  const [updateMirror, setUpdateMirror] = useState('');
 
   useEffect(() => {
     window.electronAPI?.getAppVersion().then(v => {
@@ -13,8 +14,16 @@ const About: React.FC = () => {
     });
     api.getSettings().then(s => {
       if (s.config_path) setConfigPath(s.config_path);
+      if (s.update_mirror) setUpdateMirror(s.update_mirror);
     }).catch(() => {});
   }, []);
+
+  const handleSaveMirror = async (url: string) => {
+    setUpdateMirror(url);
+    try {
+      await api.updateSettings({ update_mirror: url });
+    } catch { /* ignore */ }
+  };
 
   useEffect(() => {
     window.electronAPI?.onUpdateStatus((status: any) => {
@@ -70,6 +79,18 @@ const About: React.FC = () => {
           >
             {checking ? '检查中...' : '检查更新'}
           </button>
+          <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              value={updateMirror}
+              onChange={e => handleSaveMirror(e.target.value)}
+              placeholder="更新镜像 (如 https://ghproxy.com)"
+              style={{
+                flex: 1, padding: '6px 10px', fontSize: 12,
+                background: 'var(--bg-card)', border: '1px solid var(--border)',
+                borderRadius: 'var(--radius)', color: 'var(--text-primary)',
+              }}
+            />
+          </div>
           {updateStatus && (
             <div style={{ marginTop: 8, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
               <code style={{

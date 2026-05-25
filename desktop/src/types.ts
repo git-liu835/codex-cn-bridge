@@ -38,8 +38,10 @@ export interface ServerSettings {
     auto_start: boolean;
     close_to_tray: boolean;
     audit_log_path: string;
+    update_mirror: string;
   };
   config_path: string;
+  update_mirror?: string;
 }
 
 export interface RequestLogEntry {

@@ -324,6 +324,7 @@ async def get_settings():
             "auto_start": cfg._data.get("server", {}).get("auto_start", False),
             "close_to_tray": cfg._data.get("server", {}).get("close_to_tray", True),
             "audit_log_path": cfg._data.get("server", {}).get("audit_log_path", ""),
+            "update_mirror": cfg._data.get("server", {}).get("update_mirror", ""),
         },
         "config_path": str(cfg._config_path) if cfg._config_path else "",
     }
@@ -347,6 +348,8 @@ async def update_settings(data: dict):
         server_cfg["close_to_tray"] = data["close_to_tray"]
     if "audit_log_path" in data:
         server_cfg["audit_log_path"] = data["audit_log_path"]
+    if "update_mirror" in data:
+        server_cfg["update_mirror"] = data["update_mirror"]
 
     cfg.save()
     return {"status": "ok", "message": "设置已保存，部分设置需重启后生效"}
