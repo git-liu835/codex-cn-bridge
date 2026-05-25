@@ -6,24 +6,47 @@
 
 ## 两种使用方式
 
-### 方式一：桌面安装包（推荐）
+### 方式一：桌面安装包（推荐，无需安装任何依赖）
 
-从 [Releases](https://github.com/git-liu835/code-cn-bridge/releases) 页面下载对应平台的安装包安装，双击启动即可：
+内置 Python 后端 + Node.js 前端，开箱即用，不需要装 Python、Node 等任何环境。
 
-| 平台 | 安装包 |
-|------|--------|
-| Windows | `code-CN-Bridge-Setup-0.1.0.exe` |
-| macOS | `code-CN-Bridge-0.1.0.dmg` |
-| Linux | `code-CN-Bridge-0.1.0.AppImage` |
-<img width="1420" height="622" alt="a1970f0e890f194e2f7f687ca4bca784" src="https://github.com/user-attachments/assets/6af8fa21-76b1-4ae1-b04d-cecdc9150a73" />
+#### 命令行一键安装
 
-安装后：打开软件 → 配置模型和 API Key → 点击启动 → 完成。无需安装 Python 环境。
+**Windows**（PowerShell 管理员运行）：
+```powershell
+irm https://github.com/git-liu835/code-cn-bridge/releases/latest/download/code-CN-Bridge-Setup-latest.exe -OutFile setup.exe; ./setup.exe /S
+```
+> 安装到默认目录 `%LocalAppData%\code CN Bridge`，安装完自动在桌面和开始菜单创建快捷方式。
+
+**macOS**：
+```bash
+curl -L -o /tmp/bridge.dmg https://github.com/git-liu835/code-cn-bridge/releases/latest/download/code-CN-Bridge-latest.dmg
+hdiutil attach /tmp/bridge.dmg -nobrowse
+# 手动拖入 Applications 文件夹
+```
+
+**Linux**：
+```bash
+curl -L -o code-cn-bridge.AppImage https://github.com/git-liu835/code-cn-bridge/releases/latest/download/code-CN-Bridge-latest.AppImage
+chmod +x code-cn-bridge.AppImage && ./code-cn-bridge.AppImage
+```
+```bash
+# 或 deb 包
+curl -L -o code-cn-bridge.deb https://github.com/git-liu835/code-cn-bridge/releases/latest/download/code-CN-Bridge-latest.deb
+sudo dpkg -i code-cn-bridge.deb
+```
+
+也可以从 [Releases](https://github.com/git-liu835/code-cn-bridge/releases) 页面手动下载安装。
+
+> **Windows Defender 提示？** 项目已开源，因未购买代码签名证书，Defender 可能误报。点击「更多信息」→「仍要运行」即可。安装后打开软件 → 配置模型和 API Key → 启动代理。
 
 配置 code CLI 连接代理：
 ```bash
 export OPENAI_BASE_URL="http://localhost:8765/v1"
 export OPENAI_API_KEY="any-value"
 ```
+
+<img width="1420" height="622" alt="screenshot" src="https://github.com/user-attachments/assets/6af8fa21-76b1-4ae1-b04d-cecdc9150a73" />
 
 ### 方式二：源码运行
 

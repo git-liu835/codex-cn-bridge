@@ -52,6 +52,16 @@ export const api = {
   getLogs: (limit = 100) => request<{ logs: RequestLogEntry[] }>(`/admin/api/logs?limit=${limit}`),
   clearLogs: () => request<{ status: string }>('/admin/api/logs/clear', { method: 'POST' }),
 
+  // 详细日志
+  getDetailedLogsStatus: () => request<{ enabled: boolean; count: number }>('/admin/api/detailed-logs/status'),
+  toggleDetailedLogs: (enabled: boolean) =>
+    request<{ enabled: boolean; message: string }>('/admin/api/detailed-logs/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
+  getDetailedLogs: () => request<{ logs: import('../types').DetailLogEntry[] }>('/admin/api/detailed-logs'),
+  clearDetailedLogs: () => request<{ status: string }>('/admin/api/detailed-logs/clear', { method: 'POST' }),
+
   // 配置导入导出
   exportConfig: () => request<{ yaml: string; config_path: string }>('/admin/api/config/export'),
   importConfig: (yaml: string) =>

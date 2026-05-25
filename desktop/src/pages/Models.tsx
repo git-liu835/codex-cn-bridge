@@ -138,6 +138,10 @@ const Models: React.FC = () => {
 
   const handleAddCard = async () => {
     if (!cardForm.provider || !cardForm.alias || !cardForm.target) return;
+    if (allAliases.includes(cardForm.alias)) {
+      alert(lang === 'zh' ? `别名 "${cardForm.alias}" 已存在，请换一个` : `Alias "${cardForm.alias}" already exists`);
+      return;
+    }
     setLoading(true);
     try {
       const flags = typeToFlags(cardForm.mtype);

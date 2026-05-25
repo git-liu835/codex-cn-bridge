@@ -89,7 +89,9 @@ async def add_model(data: dict):
     # 更新 provider 信息
     provider_name = data.get("provider", target)
     providers = cfg._data.setdefault("providers", {})
-    if provider_name not in providers:
+
+    is_new_provider = provider_name not in providers
+    if is_new_provider:
         providers[provider_name] = {
             "adapter": data.get("adapter", provider_name),
             "base_url": data.get("base_url", ""),
@@ -97,31 +99,22 @@ async def add_model(data: dict):
             "enabled": data.get("enabled", True),
         }
     else:
-        # 更新已有的 provider 字段
         p = providers[provider_name]
-        if "adapter" in data:
+        # 已有 provider：仅当前端明确传了非空值时才更新（防止空字符串覆盖已有配置）
+        if data.get("adapter"):
             p["adapter"] = data["adapter"]
-        if "base_url" in data:
+        if data.get("base_url"):
             p["base_url"] = data["base_url"]
-        if "api_key_env" in data:
+        if data.get("api_key_env"):
             p["api_key_env"] = data["api_key_env"]
 
-    # 更新 api_key
+    # 更新 api_key（仅当提供了新 key）
     if data.get("api_key"):
         providers[provider_name]["api_key"] = data["api_key"]
 
-    if "enabled" in data:
+    # 已有 provider 不覆盖 enabled，新 provider 使用传入值
+    if is_new_provider and "enabled" in data:
         providers[provider_name]["enabled"] = data["enabled"]
-
-    # 更新高级选项
-    advanced = data.get("advanced", {})
-    if advanced:
-        providers[provider_name].update({
-            "timeout": advanced.get("timeout", 120),
-            "max_retries": advanced.get("max_retries", 0),
-            "tool_calls_enabled": advanced.get("tool_calls_enabled", True),
-            "extra_headers": advanced.get("extra_headers", {}),
-        })
 
     # 存储 model_mapping（新格式）
     mapping = cfg._data.setdefault("model_mapping", {})
@@ -189,11 +182,6 @@ async def update_model(alias: str, data: dict):
             p["enabled"] = data["enabled"]
 
         advanced = data.get("advanced", {})
-        if advanced:
-            p["timeout"] = advanced.get("timeout", p.get("timeout", 120))
-            p["max_retries"] = advanced.get("max_retries", p.get("max_retries", 0))
-            p["tool_calls_enabled"] = advanced.get("tool_calls_enabled", p.get("tool_calls_enabled", True))
-            p["extra_headers"] = advanced.get("extra_headers", p.get("extra_headers", {}))
         if advanced:
             p["timeout"] = advanced.get("timeout", p.get("timeout", 120))
             p["max_retries"] = advanced.get("max_retries", p.get("max_retries", 0))
@@ -408,6 +396,43 @@ async def logs_stream(websocket: WebSocket):
         pass
     finally:
         stats.remove_listener(on_log)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 详细日志（完整请求/响应捕获）
+# ═══════════════════════════════════════════════════════════════════
+
+@router.get("/detailed-logs/status")
+async def get_detailed_logs_status():
+    """获取详细日志开关状态"""
+    stats = get_stats()
+    return {
+        "enabled": stats.detailed_enabled,
+        "count": len(stats.get_detailed_logs()),
+    }
+
+
+@router.post("/detailed-logs/toggle")
+async def toggle_detailed_logs(data: dict | None = None):
+    """开关详细日志"""
+    stats = get_stats()
+    enabled = (data or {}).get("enabled", not stats.detailed_enabled)
+    stats.set_detailed_enabled(enabled)
+    return {"enabled": enabled, "message": "详细日志已开启" if enabled else "详细日志已关闭"}
+
+
+@router.get("/detailed-logs")
+async def get_detailed_logs():
+    """获取详细日志列表（最近 100 条）"""
+    stats = get_stats()
+    return {"logs": stats.get_detailed_logs()}
+
+
+@router.post("/detailed-logs/clear")
+async def clear_detailed_logs():
+    """清空详细日志"""
+    get_stats().clear_detailed_logs()
+    return {"status": "ok"}
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -23,6 +23,7 @@ from .client import UpstreamClient
 from .middleware import (
     ErrorHandlingMiddleware,
     RequestLoggingMiddleware,
+    DetailedLoggingMiddleware,
     ApiKeyFilter,
 )
 from .models import build_error_response, build_responses_response, make_message_output_item, _uid
@@ -387,6 +388,7 @@ def create_app(verbose: bool = False) -> FastAPI:
 
     app.add_middleware(ErrorHandlingMiddleware)
     app.add_middleware(RequestLoggingMiddleware)
+    app.add_middleware(DetailedLoggingMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "app://."],

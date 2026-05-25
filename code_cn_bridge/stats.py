@@ -103,6 +103,43 @@ class StatsCollector:
             self._error_count = 0
             self._total_latency_ms = 0.0
 
+    # ── 详细日志（完整请求/响应内容）─────────────────────────────
+
+    def __init_detail(self):
+        """lazy init for detailed log fields"""
+        if not hasattr(self, '_detailed_logs'):
+            self._detailed_logs: deque[dict] = deque(maxlen=100)
+            self._detailed_enabled: bool = False
+
+    @property
+    def detailed_enabled(self) -> bool:
+        self.__init_detail()
+        return self._detailed_enabled
+
+    def set_detailed_enabled(self, enabled: bool):
+        self.__init_detail()
+        self._detailed_enabled = enabled
+
+    def record_detailed_log(self, entry: dict):
+        self.__init_detail()
+        with self._lock:
+            self._detailed_logs.appendleft(entry)
+        for cb in self._log_listeners:
+            try:
+                cb({"type": "detailed", "entry": entry})
+            except Exception:
+                pass
+
+    def get_detailed_logs(self) -> list[dict]:
+        self.__init_detail()
+        with self._lock:
+            return list(self._detailed_logs)
+
+    def clear_detailed_logs(self):
+        self.__init_detail()
+        with self._lock:
+            self._detailed_logs.clear()
+
 
 # 全局单例
 _stats: StatsCollector | None = None

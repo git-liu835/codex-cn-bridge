@@ -369,6 +369,39 @@ input, select, textarea, button {
 .log-tokens { color: var(--warning); user-select: text; }
 .log-error { color: var(--error); flex: 1; word-break: break-all; user-select: text; }
 
+/* ── 详细日志 ──────────────────────────────────── */
+.detail-log-entry {
+  border-bottom: 1px solid var(--border);
+  font-size: 12px; user-select: text;
+}
+.detail-log-entry.error { background: rgba(248,113,113,0.05); }
+.detail-log-summary {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 12px;
+}
+.detail-log-body {
+  padding: 0 12px 12px 12px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px; padding-top: 12px;
+}
+.detail-section { margin-bottom: 12px; }
+.detail-label {
+  font-weight: 600; margin-bottom: 6px;
+  color: var(--text-secondary); font-size: 12px;
+}
+.detail-code {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px; margin: 0;
+  font-size: 11px; font-family: 'SF Mono', 'Fira Code', monospace;
+  white-space: pre-wrap; word-break: break-all;
+  max-height: 400px; overflow-y: auto;
+  color: var(--text-primary);
+  user-select: text;
+}
+.log-method { color: var(--accent); user-select: text; }
+
 /* ═══════ About ═══════ */
 
 .about-card { text-align: center; max-width: 500px; margin: 0 auto; }

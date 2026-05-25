@@ -61,3 +61,15 @@ export interface TestResult {
   elapsed_ms?: number;
   message: string;
 }
+
+export interface DetailLogEntry {
+  timestamp: number;
+  time: string;
+  method: string;
+  path: string;
+  query: string;
+  request_body: string;
+  response_status: number;
+  response_body: string;
+  elapsed_ms: number;
+}
