@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.5 (2026-05-25)
+
+### Features
+
+- **详细日志开关**: 监控日志页面新增开关，开启后捕获每条 /v1/ 请求的完整请求体和响应体，点击可展开查看 JSON 内容，自动保留最近 100 条
+- **一键安装命令**: README 添加各平台命令行一键安装命令（Windows/macOS/Linux）
+
+### Bug Fixes
+
+- **模型卡片被覆盖**: 修复在已有 provider 下添加新模型时，空表单字段覆盖 provider 的 base_url/api_key_env 配置
+- **update_model 重复代码**: 删除 update_model 端点中重复执行的 advanced 代码块
+- **卡片表单重名检查**: handleAddCard 添加 alias 重名检查，防止覆盖已有模型配置
+
+### Commits
+
+- `13f8e0d` — feat: detailed request logging toggle + fix model card overwrite bug
+
 ## v0.3.4 (2026-05-23)
 
 ### Features
@@ -14,7 +31,7 @@
 
 ### Commits
 
-- `(pending)` — feat: add auto-update with user-choice dialogs
+- `6cb9745` — feat: auto-update with user-choice dialogs, bump to 0.3.4
 
 ## v0.3.3 (2026-05-23)
 
