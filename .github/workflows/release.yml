@@ -63,6 +63,10 @@ jobs:
         run: |
           cd desktop
           npx electron-builder --config electron-builder.yml --publish never 2>&1
+          # 重命名 latest.yml 避免多平台覆盖
+          if [ -f release/latest.yml ]; then
+            mv release/latest.yml "release/latest-${{ matrix.artifact }}.yml"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -82,6 +86,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: '*'
@@ -89,6 +95,70 @@ jobs:
           merge-multiple: true
 
       - run: ls -la artifacts/
+
+      # 合并各平台的 latest-*.yml 为统一的 latest.yml
+      - name: Merge platform latest.yml
+        run: |
+          python3 -c "
+          import os, re
+          from datetime import datetime, timezone
+
+          artifacts = 'artifacts'
+          ymls = sorted(f for f in os.listdir(artifacts) if f.startswith('latest-') and f.endswith('.yml'))
+
+          all_files = []
+          version = ''
+          primary_path = ''
+          primary_sha = ''
+
+          for yml in ymls:
+              with open(os.path.join(artifacts, yml), 'r') as fh:
+                  content = fh.read()
+
+              if not version:
+                  m = re.search(r'^version:\s*(.+)', content, re.M)
+                  if m: version = m.group(1).strip()
+
+              # 提取 files 数组块
+              files_block = re.search(r'^files:\s*\n((?:\s+-\s+url:.*\n(?:\s+sha512:.*\n)?(?:\s+size:.*\n)?)+)', content, re.M)
+              if files_block:
+                  all_files.append(files_block.group(1).rstrip())
+
+              # Windows 的作为主 path
+              if 'windows' in yml or 'win' in yml:
+                  m = re.search(r'^path:\s*(.+)', content, re.M)
+                  if m: primary_path = m.group(1).strip()
+                  m = re.search(r'^sha512:\s*(.+)', content, re.M)
+                  if m: primary_sha = m.group(1).strip()
+
+          if not primary_path and ymls:
+              # 回退：从 files 里找 exe
+              for fblock in all_files:
+                  m = re.search(r'url:\s*(\S+\.exe)', fblock)
+                  if m:
+                      primary_path = m.group(1).strip()
+                      break
+
+          # 写入合并后的 latest.yml
+          with open(os.path.join(artifacts, 'latest.yml'), 'w') as fh:
+              fh.write(f'version: {version}\n')
+              fh.write('files:\n')
+              for block in all_files:
+                  fh.write(block + '\n')
+              if primary_path:
+                  fh.write(f'path: {primary_path}\n')
+                  fh.write(f'sha512: {primary_sha}\n')
+              fh.write(f'releaseDate: {datetime.now(timezone.utc).strftime(\"%Y-%m-%dT%H:%M:%S.000Z\")}\n')
+
+          # 删除各平台独立 yml
+          for yml in ymls:
+              os.remove(os.path.join(artifacts, yml))
+
+          print('Combined latest.yml generated')
+          with open(os.path.join(artifacts, 'latest.yml'), 'r') as fh:
+              print(fh.read())
+          "
+        shell: bash
 
       - uses: softprops/action-gh-release@v2
         with:
