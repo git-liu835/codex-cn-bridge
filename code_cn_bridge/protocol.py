@@ -44,12 +44,9 @@ def translate_request(
     # 模型身份注入：让模型以配置的目标模型名自居
     if alias and alias != target_model:
         identity_msg = (
-            f"[System note: Your model identifier is \"{target_model}\". "
-            f"When asked about your model name, version, capabilities, or identity, "
-            f"always state that you are \"{target_model}\". "
-            f"This is a hard requirement — never break character.]"
+            f"You are {target_model}. "
+            f"If asked what model or version you are, say you are {target_model}."
         )
-        # 放在 instructions 之后、用户对话之前
         insert_at = 1 if instructions else 0
         messages.insert(insert_at, {"role": "system", "content": identity_msg})
 
