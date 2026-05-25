@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.3.6 (2026-05-25)
+
+### Bug Fixes
+
+- **更新检查 404**: 修复 electron-builder repo 名错误 (code-cn-bridge → codex-cn-bridge)，导致 latest.yml 404
+- **latest.yml 未上传**: CI workflow 添加 `*.yml` 到构建产物上传列表
+- **配置文件损坏**: 改用原子写入（temp file + rename），防止更新时杀进程导致配置丢失
+- **更新日志可复制**: About 页面报错信息用 code 块 + 复制按钮展示
+
+### Commits
+
+- `6d82b67` — fix: auto-update repo name and missing latest.yml
+- `100c9db` — fix: atomic config write, copyable error logs
+
 ## v0.3.5 (2026-05-25)
 
 ### Features
