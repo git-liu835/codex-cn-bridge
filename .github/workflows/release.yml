@@ -73,6 +73,7 @@ jobs:
             desktop/release/*.AppImage
             desktop/release/*.deb
             desktop/release/*.blockmap
+            desktop/release/*.yml
           if-no-files-found: ignore
 
   release:

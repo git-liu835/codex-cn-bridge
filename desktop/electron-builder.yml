@@ -5,7 +5,7 @@ copyright: MIT
 publish:
   provider: github
   owner: git-liu835
-  repo: code-cn-bridge
+  repo: codex-cn-bridge
   releaseType: release
 
 directories:
