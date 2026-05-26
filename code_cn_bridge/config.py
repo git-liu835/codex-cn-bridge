@@ -132,32 +132,51 @@ class Config:
         self._normalize_mapping()
 
     def _normalize_mapping(self) -> None:
-        """将旧格式 model_mapping ({alias: target_string}) 迁移到新格式 ({alias: {target, ...}})"""
+        """将旧格式 model_mapping ({alias: target_string}) 迁移到新格式 ({alias: {target, ...}} 或列表)
+
+        支持三种格式：
+        - 旧格式: alias → target_string
+        - 单模型: alias → {target, provider, ...}
+        - 多模型: alias → [{target, provider, ...}, ...]  (同名多个后端，仅一个 enabled)
+        """
         mapping = self._data.get("model_mapping", {})
         normalized = {}
+
+        def _norm_entry(entry: dict) -> dict:
+            entry.setdefault("provider", "")
+            entry.setdefault("is_multimodal", False)
+            entry.setdefault("vision_alias", None)
+            entry.setdefault("is_image_gen", False)
+            entry.setdefault("image_gen_alias", None)
+            entry.setdefault("is_video_gen", False)
+            entry.setdefault("video_gen_alias", None)
+            entry.setdefault("enabled", True)
+            return entry
+
         for alias, entry in mapping.items():
             if isinstance(entry, str):
-                normalized[alias] = {
+                normalized[alias] = _norm_entry({
                     "target": entry,
                     "provider": "",
                     "enabled": True,
-                    "is_multimodal": False,
-                    "vision_alias": None,
-                    "is_image_gen": False,
-                    "image_gen_alias": None,
-                    "is_video_gen": False,
-                    "video_gen_alias": None,
-                }
+                })
+            elif isinstance(entry, list):
+                # 多模型列表：规范化每个条目，确保仅一个 enabled
+                items = [_norm_entry(e) for e in entry]
+                enabled_count = sum(1 for e in items if e.get("enabled"))
+                if enabled_count == 0 and items:
+                    items[0]["enabled"] = True
+                elif enabled_count > 1:
+                    first = True
+                    for e in items:
+                        if e.get("enabled"):
+                            if first:
+                                first = False
+                            else:
+                                e["enabled"] = False
+                normalized[alias] = items
             elif isinstance(entry, dict):
-                entry.setdefault("provider", "")
-                entry.setdefault("is_multimodal", False)
-                entry.setdefault("vision_alias", None)
-                entry.setdefault("is_image_gen", False)
-                entry.setdefault("image_gen_alias", None)
-                entry.setdefault("is_video_gen", False)
-                entry.setdefault("video_gen_alias", None)
-                entry.setdefault("enabled", True)
-                normalized[alias] = entry
+                normalized[alias] = _norm_entry(entry)
         self._data["model_mapping"] = normalized
 
     # ── 属性访问 ─────────────────────────────────────────────────
@@ -206,12 +225,11 @@ class Config:
 
         返回: (provider_name, target_model)
         例如: resolve_model("gpt-5-code") → ("qwen", "qwen-plus")
+
+        支持多模型列表：当 alias 映射到列表时，使用第一个 enabled 的条目。
         """
-        # 1. 先查 model_mapping 精确映射（仅启用的条目）
-        #    模型明确指定了 provider 时，只检查该 provider 有无 API key，
-        #    不检查 provider 级别的 enabled 标志（那个由模型级别 enabled 控制）
-        entry = self.model_mapping.get(model_name)
-        if isinstance(entry, dict) and entry.get("enabled", True):
+        # 辅助：从单个条目查找 provider
+        def _resolve_entry(entry: dict) -> tuple[str, str] | None:
             target = entry.get("target", model_name)
             provider_name = entry.get("provider", "")
             if not provider_name:
@@ -220,6 +238,20 @@ class Config:
                 p = self.providers[provider_name]
                 if self._has_api_key(p):
                     return provider_name, target
+            return None
+
+        # 1. 先查 model_mapping 精确映射（仅启用的条目）
+        entry = self.model_mapping.get(model_name)
+        if isinstance(entry, list):
+            for item in entry:
+                if item.get("enabled", True):
+                    result = _resolve_entry(item)
+                    if result:
+                        return result
+        elif isinstance(entry, dict) and entry.get("enabled", True):
+            result = _resolve_entry(entry)
+            if result:
+                return result
 
         # 2. 模糊匹配 provider 名（仅启用且有 API key 的 provider）
         for pname, pinfo in self.providers.items():

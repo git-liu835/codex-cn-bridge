@@ -43,42 +43,60 @@ async def get_status():
 # 模型 CRUD
 # ═══════════════════════════════════════════════════════════════════
 
+def _build_model_entry(alias: str, entry: dict, providers: dict, available_adapters: list[str],
+                        index: int | None = None, active: bool = False) -> dict:
+    """从映射条目构建前端模型对象"""
+    target = entry.get("target", alias)
+    provider_name = entry.get("provider", "") or _find_provider_for_target(target, providers)
+    provider = providers.get(provider_name, {})
+    model = {
+        "alias": alias,
+        "target_model": target,
+        "provider": provider_name or "",
+        "adapter": provider.get("adapter", ""),
+        "base_url": provider.get("base_url", ""),
+        "api_key_env": provider.get("api_key_env", ""),
+        "api_key_set": bool(provider.get("api_key", "")),
+        "enabled": entry.get("enabled", True),
+        "is_multimodal": entry.get("is_multimodal", False),
+        "vision_alias": entry.get("vision_alias") or "",
+        "is_image_gen": entry.get("is_image_gen", False),
+        "image_gen_alias": entry.get("image_gen_alias") or "",
+        "is_video_gen": entry.get("is_video_gen", False),
+        "video_gen_alias": entry.get("video_gen_alias") or "",
+        "available_adapters": available_adapters,
+    }
+    if index is not None:
+        model["_index"] = index
+    if active:
+        model["_active"] = True
+    return model
+
+
 @router.get("/models")
 async def list_models():
-    """获取所有模型配置"""
+    """获取所有模型配置（多模型列表条目已展开）"""
     cfg = get_config()
     reg = get_registry()
     providers = cfg.providers
     mapping = cfg.model_mapping
+    adapters = reg.list()
 
     models = []
     for alias, entry in mapping.items():
-        target = entry.get("target", alias)
-        provider_name = entry.get("provider", "") or _find_provider_for_target(target, providers)
-        provider = providers.get(provider_name, {})
-        models.append({
-            "alias": alias,
-            "target_model": target,
-            "provider": provider_name or "",
-            "adapter": provider.get("adapter", ""),
-            "base_url": provider.get("base_url", ""),
-            "api_key_env": provider.get("api_key_env", ""),
-            "api_key_set": bool(provider.get("api_key", "")),
-            "enabled": entry.get("enabled", True) if isinstance(entry, dict) else provider.get("enabled", True),
-            "is_multimodal": entry.get("is_multimodal", False),
-            "vision_alias": entry.get("vision_alias") or "",
-            "is_image_gen": entry.get("is_image_gen", False),
-            "image_gen_alias": entry.get("image_gen_alias") or "",
-            "is_video_gen": entry.get("is_video_gen", False),
-            "video_gen_alias": entry.get("video_gen_alias") or "",
-            "available_adapters": reg.list(),
-        })
+        if isinstance(entry, list):
+            for i, item in enumerate(entry):
+                models.append(_build_model_entry(
+                    alias, item, providers, adapters,
+                    index=i, active=item.get("enabled", False)))
+        elif isinstance(entry, dict):
+            models.append(_build_model_entry(alias, entry, providers, adapters))
     return {"models": models}
 
 
 @router.post("/models")
 async def add_model(data: dict):
-    """添加模型映射"""
+    """添加模型映射（同名 alias 会追加为多模型列表）"""
     cfg = get_config()
     alias = data.get("alias", "").strip()
     target = data.get("target_model", "").strip()
@@ -100,7 +118,6 @@ async def add_model(data: dict):
         }
     else:
         p = providers[provider_name]
-        # 已有 provider：仅当前端明确传了非空值时才更新（防止空字符串覆盖已有配置）
         if data.get("adapter"):
             p["adapter"] = data["adapter"]
         if data.get("base_url"):
@@ -108,17 +125,13 @@ async def add_model(data: dict):
         if data.get("api_key_env"):
             p["api_key_env"] = data["api_key_env"]
 
-    # 更新 api_key（仅当提供了新 key）
     if data.get("api_key"):
         providers[provider_name]["api_key"] = data["api_key"]
-
-    # 已有 provider 不覆盖 enabled，新 provider 使用传入值
     if is_new_provider and "enabled" in data:
         providers[provider_name]["enabled"] = data["enabled"]
 
-    # 存储 model_mapping（新格式）
-    mapping = cfg._data.setdefault("model_mapping", {})
-    mapping[alias] = {
+    # 构建新条目
+    new_entry = {
         "target": target,
         "provider": provider_name,
         "enabled": data.get("enabled", True),
@@ -129,35 +142,63 @@ async def add_model(data: dict):
         "is_video_gen": data.get("is_video_gen", False),
         "video_gen_alias": data.get("video_gen_alias") or None,
     }
+
+    mapping = cfg._data.setdefault("model_mapping", {})
+    existing = mapping.get(alias)
+
+    if existing is None:
+        # 全新别名
+        mapping[alias] = new_entry
+    elif isinstance(existing, list):
+        # 已是多模型列表，追加
+        if new_entry["enabled"]:
+            for e in existing:
+                e["enabled"] = False
+        existing.append(new_entry)
+    elif isinstance(existing, dict):
+        # 单模型 → 转为多模型列表
+        existing["enabled"] = existing.get("enabled", True)
+        if new_entry["enabled"]:
+            existing["enabled"] = False
+        mapping[alias] = [existing, new_entry]
+
     cfg.save()
     return {"status": "ok", "alias": alias}
 
 
 @router.put("/models/{alias}")
-async def update_model(alias: str, data: dict):
-    """更新模型配置"""
+async def update_model(alias: str, data: dict, _index: int | None = None):
+    """更新模型配置（支持多模型列表的 _index 查询参数）"""
     cfg = get_config()
     mapping = cfg._data.get("model_mapping", {})
 
     if alias not in mapping:
         return {"error": f"模型别名 '{alias}' 不存在"}, 404
 
-    old_entry = mapping[alias]
-    old_target = old_entry.get("target", old_entry) if isinstance(old_entry, dict) else old_entry
+    raw_entry = mapping[alias]
 
+    # 定位要更新的条目
+    if isinstance(raw_entry, list):
+        if _index is None or _index < 0 or _index >= len(raw_entry):
+            return {"error": f"多模型列表需要有效的 _index (0~{len(raw_entry)-1})"}, 400
+        old_entry = raw_entry[_index]
+    else:
+        if _index is not None and _index > 0:
+            return {"error": "单模型不支持 _index"}, 400
+        old_entry = raw_entry
+
+    old_target = old_entry.get("target", alias) if isinstance(old_entry, dict) else old_entry
     target = data.get("target_model", old_target)
     providers = cfg._data.setdefault("providers", {})
     provider_name = data.get("provider", old_entry.get("provider", "") if isinstance(old_entry, dict) else "")
 
-    # 回退：如果 provider_name 为空，从 target 反查 provider
     if not provider_name or provider_name not in providers:
         found = _find_provider_for_target(old_target, providers)
         if found:
             provider_name = found
 
-    # 更新 model_mapping 条目
     old_dict = old_entry if isinstance(old_entry, dict) else {}
-    mapping[alias] = {
+    updated_entry = {
         "target": target,
         "provider": provider_name,
         "enabled": data.get("enabled", old_dict.get("enabled", True)),
@@ -168,6 +209,27 @@ async def update_model(alias: str, data: dict):
         "is_video_gen": data.get("is_video_gen", old_dict.get("is_video_gen", False)),
         "video_gen_alias": data.get("video_gen_alias") if "video_gen_alias" in data else old_dict.get("video_gen_alias"),
     }
+
+    # 更新：如果本条目被启用，禁用同 alias 其他条目
+    # 如果本条目被禁用，且是唯一的启用条目，则启用第一个其他条目
+    if isinstance(raw_entry, list):
+        if updated_entry["enabled"]:
+            for i, e in enumerate(raw_entry):
+                if i != _index:
+                    e["enabled"] = False
+        else:
+            other_enabled = any(e.get("enabled") for i, e in enumerate(raw_entry) if i != _index)
+            if not other_enabled and len(raw_entry) > 1:
+                # 找到第一个不是本索引的条目并启用
+                for i, e in enumerate(raw_entry):
+                    if i != _index:
+                        e["enabled"] = True
+                        break
+
+    if isinstance(raw_entry, list):
+        raw_entry[_index] = updated_entry
+    else:
+        mapping[alias] = updated_entry
 
     # 更新 provider
     if provider_name and provider_name in providers:
@@ -193,37 +255,96 @@ async def update_model(alias: str, data: dict):
 
 
 @router.delete("/models/{alias}")
-async def delete_model(alias: str):
-    """删除模型映射"""
+async def delete_model(alias: str, _index: int | None = None):
+    """删除模型映射（支持多模型列表的 _index 查询参数）"""
     cfg = get_config()
     mapping = cfg._data.get("model_mapping", {})
 
     if alias not in mapping:
         return {"error": f"模型别名 '{alias}' 不存在"}, 404
 
-    del cfg._data["model_mapping"][alias]
+    entry = mapping[alias]
+    if isinstance(entry, list):
+        if _index is None:
+            return {"error": f"多模型列表需要 _index 参数 (0~{len(entry)-1})"}, 400
+        if _index < 0 or _index >= len(entry):
+            return {"error": f"_index 超出范围 (0~{len(entry)-1})"}, 400
+        removed = entry.pop(_index)
+        # 如果删除的是启用的，激活第一个剩余条目
+        if removed.get("enabled") and entry:
+            entry[0]["enabled"] = True
+        # 如果只剩一个，降级为单模型
+        if len(entry) == 1:
+            mapping[alias] = entry[0]
+        elif len(entry) == 0:
+            del mapping[alias]
+    else:
+        if _index is not None:
+            return {"error": "单模型不支持 _index"}, 400
+        del cfg._data["model_mapping"][alias]
+
     cfg.save()
     return {"status": "ok"}
+
+
+@router.post("/models/{alias}/activate/{index}")
+async def activate_model(alias: str, index: int):
+    """激活多模型列表中指定索引的条目（切换当前使用的后端）"""
+    cfg = get_config()
+    mapping = cfg._data.get("model_mapping", {})
+
+    if alias not in mapping:
+        return {"error": f"模型别名 '{alias}' 不存在"}, 404
+
+    entry = mapping[alias]
+    if not isinstance(entry, list):
+        return {"error": "单模型无需激活/切换"}, 400
+    if index < 0 or index >= len(entry):
+        return {"error": f"索引超出范围 (0~{len(entry)-1})"}, 400
+
+    # 激活指定条目，禁用其他
+    for i, e in enumerate(entry):
+        e["enabled"] = (i == index)
+
+    cfg.save()
+    return {"status": "ok", "alias": alias, "active_index": index}
 
 
 # ═══════════════════════════════════════════════════════════════════
 # 连接测试
 # ═══════════════════════════════════════════════════════════════════
 
+def _resolve_test_entry(cfg, alias: str, index: int | None = None) -> tuple[str, str, str]:
+    """解析测试连接用的 (provider_name, target, adapter_name)"""
+    providers = cfg.providers
+    mapping = cfg._data.get("model_mapping", {})
+
+    entry = mapping.get(alias, alias)
+    if isinstance(entry, list):
+        if index is not None and 0 <= index < len(entry):
+            item = entry[index]
+        else:
+            # 取第一个 enabled 的
+            item = next((e for e in entry if e.get("enabled")), entry[0])
+        target = item.get("target", alias)
+        provider_name = item.get("provider", "") or _find_provider_for_target(target, providers)
+    elif isinstance(entry, dict):
+        target = entry.get("target", alias)
+        provider_name = entry.get("provider", "") or _find_provider_for_target(target, providers)
+    else:
+        target = entry
+        provider_name = _find_provider_for_target(target, providers)
+    return provider_name, target, provider_name
+
+
 @router.post("/models/{alias}/test")
 async def test_connection(alias: str, data: dict | None = None):
     """测试模型连接"""
     cfg = get_config()
     reg = get_registry()
-    mapping = cfg._data.get("model_mapping", {})
+    _index = data.get("_index") if data else None
 
-    entry = mapping.get(alias, alias)
-    if isinstance(entry, dict):
-        target = entry.get("target", alias)
-        provider_name = entry.get("provider", "") or _find_provider_for_target(target, cfg.providers)
-    else:
-        target = entry
-        provider_name = _find_provider_for_target(target, cfg.providers)
+    provider_name, target, _ = _resolve_test_entry(cfg, alias, _index)
 
     if not provider_name:
         return {"status": "error", "message": f"未找到模型 '{alias}' 的 provider 配置"}

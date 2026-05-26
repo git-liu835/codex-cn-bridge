@@ -28,6 +28,8 @@ export interface ModelConfig {
   is_video_gen: boolean;
   video_gen_alias: string;
   available_adapters: string[];
+  _index?: number;
+  _active?: boolean;
 }
 
 export interface ServerSettings {

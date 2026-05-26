@@ -25,15 +25,20 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  updateModel: (alias: string, data: Record<string, unknown>) =>
-    request<{ status: string }>(`/admin/api/models/${encodeURIComponent(alias)}`, {
+  updateModel: (alias: string, data: Record<string, unknown>, qs?: string) =>
+    request<{ status: string }>(`/admin/api/models/${encodeURIComponent(alias)}${qs || ''}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
-  deleteModel: (alias: string) =>
-    request<{ status: string }>(`/admin/api/models/${encodeURIComponent(alias)}`, {
+  deleteModel: (alias: string, qs?: string) =>
+    request<{ status: string }>(`/admin/api/models/${encodeURIComponent(alias)}${qs || ''}`, {
       method: 'DELETE',
     }),
+  activateModel: (alias: string, index: number) =>
+    request<{ status: string; alias: string; active_index: number }>(
+      `/admin/api/models/${encodeURIComponent(alias)}/activate/${index}`,
+      { method: 'POST' }
+    ),
   testConnection: (alias: string, data?: Record<string, unknown>) =>
     request<TestResult>(`/admin/api/models/${encodeURIComponent(alias)}/test`, {
       method: 'POST',

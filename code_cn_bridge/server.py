@@ -162,10 +162,14 @@ async def _handle_responses_image_gen(
     img_provider = ""
     mapping = cfg.model_mapping
     for alias, entry in mapping.items():
-        if isinstance(entry, dict) and entry.get("is_image_gen"):
-            img_alias = alias
-            img_target = entry.get("target", alias)
-            img_provider = entry.get("provider", "")
+        items = entry if isinstance(entry, list) else [entry]
+        for item in items:
+            if isinstance(item, dict) and item.get("is_image_gen"):
+                img_alias = alias
+                img_target = item.get("target", alias)
+                img_provider = item.get("provider", "")
+                break
+        if img_alias:
             break
 
     if not img_alias:
@@ -316,22 +320,33 @@ def _route_vision(model: str, body: dict) -> tuple[BaseAdapter, str, str, str]:
 
     # 1. 检查模型级视觉配置
     entry = cfg.model_mapping.get(model)
-    if isinstance(entry, dict):
+
+    # 辅助：从条目中提取配置（支持多模型列表）
+    def _get_active_entry(e):
+        if isinstance(e, list):
+            return next((item for item in e if item.get("enabled", True)), e[0])
+        if isinstance(e, dict):
+            return e
+        return None
+
+    active_entry = _get_active_entry(entry)
+    if active_entry:
         # 多模态模型，自身能处理图片
-        if entry.get("is_multimodal"):
+        if active_entry.get("is_multimodal"):
             logger.info("模型 %s 是多模态的，使用自身处理图片", model)
             return _get_adapter_for_model(model)
         # 指定了视觉模型别名
-        vision_alias = entry.get("vision_alias")
+        vision_alias = active_entry.get("vision_alias")
         if vision_alias and vision_alias in cfg.model_mapping:
-            ventry = cfg.model_mapping[vision_alias]
-            v_target = ventry.get("target", vision_alias)
-            v_provider = ventry.get("provider", "") or ventry.get("target", "")
-            try:
-                logger.info("检测到图片输入，切换到视觉模型: %s/%s (来自 %s)", v_provider, v_target, vision_alias)
-                return _resolve_adapter(v_provider, v_target)
-            except ValueError as exc:
-                logger.warning("视觉模型 %s/%s 不可用: %s，回退到默认路由", v_provider, v_target, exc)
+            ventry = _get_active_entry(cfg.model_mapping[vision_alias])
+            if ventry:
+                v_target = ventry.get("target", vision_alias)
+                v_provider = ventry.get("provider", "") or ventry.get("target", "")
+                try:
+                    logger.info("检测到图片输入，切换到视觉模型: %s/%s (来自 %s)", v_provider, v_target, vision_alias)
+                    return _resolve_adapter(v_provider, v_target)
+                except ValueError as exc:
+                    logger.warning("视觉模型 %s/%s 不可用: %s，回退到默认路由", v_provider, v_target, exc)
 
     # 2. 回退到全局视觉路由
     vr = cfg.vision_routing
@@ -417,13 +432,21 @@ def create_app(verbose: bool = False) -> FastAPI:
         cfg = get_config()
         models = []
         for alias, entry in cfg.model_mapping.items():
-            if entry.get("enabled", True):
-                models.append({
-                    "id": alias,
-                    "object": "model",
-                    "created": 1700000000,
-                    "owned_by": entry.get("provider", "code-cn-bridge"),
-                })
+            # 支持多模型列表：至少一个条目启用就算启用
+            items = entry if isinstance(entry, list) else [entry]
+            if not any(item.get("enabled", True) for item in items):
+                continue
+            provider = ""
+            for item in items:
+                if item.get("enabled", True):
+                    provider = item.get("provider", "code-cn-bridge")
+                    break
+            models.append({
+                "id": alias,
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": provider,
+            })
         return {"object": "list", "data": models}
 
     @app.post("/admin/reload-config")
@@ -594,10 +617,16 @@ def create_app(verbose: bool = False) -> FastAPI:
             return JSONResponse({"error": {"message": "无效的 JSON 请求体"}}, 400)
 
         model = body.get("model", "unknown")
-        entry = cfg.model_mapping.get(model)
+        raw_entry = cfg.model_mapping.get(model)
 
-        if not entry:
+        if not raw_entry:
             return JSONResponse({"error": {"message": f"未找到模型: {model}"}}, 404)
+
+        # 取活跃条目（支持多模型列表）
+        if isinstance(raw_entry, list):
+            entry = next((e for e in raw_entry if e.get("enabled")), raw_entry[0])
+        else:
+            entry = raw_entry
 
         # 确定用哪个模型生图
         gen_alias = model
@@ -607,9 +636,13 @@ def create_app(verbose: bool = False) -> FastAPI:
             gen_provider = entry.get("provider", "")
         elif entry.get("image_gen_alias"):
             gen_alias = entry["image_gen_alias"]
-            gen_entry = cfg.model_mapping.get(gen_alias)
-            if not gen_entry:
+            gen_entry_raw = cfg.model_mapping.get(gen_alias)
+            if not gen_entry_raw:
                 return JSONResponse({"error": {"message": f"生图模型未找到: {gen_alias}"}}, 400)
+            if isinstance(gen_entry_raw, list):
+                gen_entry = next((e for e in gen_entry_raw if e.get("enabled")), gen_entry_raw[0])
+            else:
+                gen_entry = gen_entry_raw
             gen_target = gen_entry.get("target", gen_alias)
             gen_provider = gen_entry.get("provider", "")
         else:

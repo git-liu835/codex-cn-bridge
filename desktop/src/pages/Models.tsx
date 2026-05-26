@@ -72,6 +72,11 @@ const Models: React.FC = () => {
   const providerNames = Object.keys(groups);
   const hasTextModel = models.some(m => getModelType(m) === 'text');
 
+  // 多模型列表：找出有多个条目的 alias
+  const aliasCounts: Record<string, number> = {};
+  models.forEach(m => { aliasCounts[m.alias] = (aliasCounts[m.alias] || 0) + 1; });
+  const multiModelAliases = new Set(Object.keys(aliasCounts).filter(a => aliasCounts[a] > 1));
+
   const resetModelForm = (provider: string) => {
     setModelForm({ ...EMPTY_FORM, provider, adapter: provider || 'deepseek' });
     setModelType('text');
@@ -98,17 +103,14 @@ const Models: React.FC = () => {
       enabled: m.enabled, modelType: mt,
       vision_alias: m.vision_alias || '', image_gen_alias: m.image_gen_alias || '',
       advanced: { timeout: 120, max_retries: 0, tool_calls_enabled: true, extra_headers: {} },
-    });
+      _index: m._index,
+    } as any);
     setShowModelForm(true);
     setTestResult(null);
   };
 
   const handleSaveModel = async () => {
     if (!modelForm.alias || !modelForm.target_model) return;
-    if (!editingAlias && allAliases.includes(modelForm.alias)) {
-      alert(lang === 'zh' ? `别名 "${modelForm.alias}" 已存在，请换一个` : `Alias "${modelForm.alias}" already exists`);
-      return;
-    }
     setLoading(true);
     try {
       const flags = typeToFlags(modelType);
@@ -119,7 +121,9 @@ const Models: React.FC = () => {
         vision_alias: (modelType === 'text') ? (modelForm.vision_alias || null) : null,
       };
       if (editingAlias) {
-        await api.updateModel(editingAlias, data);
+        const idx = (modelForm as any)._index;
+        const qs = idx !== undefined ? `?_index=${idx}` : '';
+        await api.updateModel(editingAlias, data, qs);
       } else {
         await api.addModel(data);
       }
@@ -138,10 +142,6 @@ const Models: React.FC = () => {
 
   const handleAddCard = async () => {
     if (!cardForm.provider || !cardForm.alias || !cardForm.target) return;
-    if (allAliases.includes(cardForm.alias)) {
-      alert(lang === 'zh' ? `别名 "${cardForm.alias}" 已存在，请换一个` : `Alias "${cardForm.alias}" already exists`);
-      return;
-    }
     setLoading(true);
     try {
       const flags = typeToFlags(cardForm.mtype);
@@ -160,19 +160,35 @@ const Models: React.FC = () => {
   };
 
   // ═══ Inline Actions ═══════════════════════════
-  const handleDelete = async (alias: string) => {
+  const handleDelete = async (alias: string, idx?: number) => {
     if (!confirm(tl('models.confirmDelete'))) return;
-    try { await api.deleteModel(alias); await load(); } catch (e: any) { alert(e.message); }
+    try {
+      const qs = idx !== undefined ? `?_index=${idx}` : '';
+      await api.deleteModel(alias, qs); await load();
+    } catch (e: any) { alert(e.message); }
   };
 
-  const handleTest = async (alias: string) => {
+  const handleTest = async (alias: string, idx?: number) => {
     setLoading(true);
-    try { const r = await api.testConnection(alias); setTestResult(r); } catch (e: any) { setTestResult({ status: 'error', message: e.message }); }
+    try {
+      const data = idx !== undefined ? { _index: idx } : undefined;
+      const r = await api.testConnection(alias, data);
+      setTestResult(r);
+    } catch (e: any) { setTestResult({ status: 'error', message: e.message }); }
     finally { setLoading(false); }
   };
 
-  const handleQuickUpdate = async (alias: string, provider: string, fields: Record<string, any>) => {
-    try { await api.updateModel(alias, { provider, ...fields }); await load(); } catch (e) { console.error(e); }
+  const handleQuickUpdate = async (alias: string, provider: string, fields: Record<string, any>, idx?: number) => {
+    try {
+      const qs = idx !== undefined ? `?_index=${idx}` : '';
+      await api.updateModel(alias, { provider, ...fields }, qs); await load();
+    } catch (e) { console.error(e); }
+  };
+
+  const handleActivate = async (alias: string, index: number) => {
+    setLoading(true);
+    try { await api.activateModel(alias, index); await load(); } catch (e: any) { alert(e.message); }
+    finally { setLoading(false); }
   };
 
   const typeLabel = (t: ModelType) => lang === 'zh' ? TYPE_LABELS[t][0] : TYPE_LABELS[t][1];
@@ -232,15 +248,22 @@ const Models: React.FC = () => {
 
               {pModels.map(m => {
                 const mtype = getModelType(m);
+                const isMulti = multiModelAliases.has(m.alias);
+                const idx = m._index;
                 return (
-                  <div key={m.alias} className={`model-row ${!m.enabled ? 'model-disabled' : ''}`}>
+                  <div key={`${m.alias}-${idx ?? 0}-${m.provider}`} className={`model-row ${!m.enabled ? 'model-disabled' : ''}`}>
                     <label className="toggle-switch toggle-sm" title={m.enabled ? tl('common.enabled') : tl('common.disabled')}>
                       <input type="checkbox" checked={m.enabled}
-                        onChange={e => handleQuickUpdate(m.alias, m.provider, { enabled: e.target.checked })} />
+                        onChange={e => handleQuickUpdate(m.alias, m.provider, { enabled: e.target.checked }, idx)} />
                       <span className="toggle-track"><span className="toggle-thumb" /></span>
                     </label>
                     <div className="model-main">
                       <span className="model-alias">{m.alias}</span>
+                      {isMulti && m.enabled && (
+                        <span className="model-active-badge" style={{ background: 'var(--green)', color: '#fff', fontSize: 10, padding: '1px 6px', borderRadius: 8, marginLeft: 4 }}>
+                          {lang === 'zh' ? '当前' : 'Active'}
+                        </span>
+                      )}
                       <span className={`model-type-badge ${mtype.replace('_', '-')}`}>{typeLabel(mtype)}</span>
                       <span className="model-arrow">&rarr;</span>
                       <span className="model-target">{m.target_model}</span>
@@ -263,12 +286,20 @@ const Models: React.FC = () => {
                     )}
 
                     <div className="model-actions">
+                      {/* Switch button for inactive entries in multi-model aliases */}
+                      {isMulti && !m.enabled && idx !== undefined && (
+                        <button className="btn btn-sm btn-outline"
+                          onClick={() => handleActivate(m.alias, idx)} disabled={loading}
+                          style={{ color: 'var(--primary)', borderColor: 'var(--primary)' }}>
+                          {lang === 'zh' ? '切换' : 'Switch'}
+                        </button>
+                      )}
                       <button className="btn btn-sm btn-outline"
-                        onClick={() => handleTest(m.alias)} disabled={loading}>
+                        onClick={() => handleTest(m.alias, idx)} disabled={loading}>
                         {tl('models.test')}
                       </button>
                       <button className="btn btn-sm" onClick={() => openEditModel(m)}>{tl('common.edit')}</button>
-                      <button className="btn btn-sm btn-danger" onClick={() => handleDelete(m.alias)}>{tl('common.delete')}</button>
+                      <button className="btn btn-sm btn-danger" onClick={() => handleDelete(m.alias, idx)}>{tl('common.delete')}</button>
                     </div>
                   </div>
                 );
