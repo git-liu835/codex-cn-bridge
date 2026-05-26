@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.14 (2026-05-26)
+
+### Bug Fixes
+
+- **桌面图标**: 移除 BrowserWindow 的 `createEmpty()` 空白图标覆盖，修复安装后显示原生 Electron logo
+
 ## v0.3.13 (2026-05-26)
 
 ### Bug Fixes
