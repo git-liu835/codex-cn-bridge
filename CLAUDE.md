@@ -107,3 +107,71 @@ GitHub Actions (`.github/workflows/release.yml`):
 - **Stream client timeouts**: Streaming uses `httpx.Timeout(connect=30, read=600, write=30, pool=30)`. Non-streaming uses a flat 120s timeout. Both are overridable per-provider via the `timeout` field in config.
 - **API key safety**: `ApiKeyFilter` redacts keys from logs. `config.save()` strips env-sourced API keys before writing YAML.
 - **No git history safety net**: Always verify changes compile before making further edits. Use `python -m py_compile` for quick syntax checks.
+
+## Version bumping
+
+Bumping requires updating the version in **7 files** (all must match):
+
+| File | Field |
+|------|-------|
+| `desktop/package.json` | `"version"` |
+| `pyproject.toml` | `version` |
+| `code_cn_bridge/__init__.py` | `__version__` |
+| `code_cn_bridge/cli.py` | `@click.version_option(version=...)` and `click.echo(...)` — 2 places |
+| `code_cn_bridge/server.py` | `version="..."` in FastAPI constructor |
+| `code_cn_bridge/admin_api.py` | `"version"` in `/admin/api/status` response |
+
+Also update `CHANGELOG.md` with release notes. Then `git tag -a vX.Y.Z` to trigger CI.
+
+## Auto-update
+
+The desktop app uses `electron-updater` with `autoUpdater.autoDownload = false` (user controls each step). The update flow:
+
+```
+app starts → setupAutoUpdater()
+  ├── getUpdateMirror() reads update_mirror from ~/.code-cn-bridge.yaml
+  ├── IF mirror configured:
+  │     configureMirror() → fetch latest release tag via mirror API
+  │     → autoUpdater.setFeedURL({ provider: 'generic', url: mirrorBaseUrl })
+  │     → generic provider downloads latest.yml → downloads installer → verifies SHA512
+  └── IF no mirror:
+        github provider (from electron-builder.yml publish config)
+```
+
+**Mirror mechanism:** The `generic` provider fetches `latest.yml` from the mirror URL, which lists all platform artifacts with SHA512 hashes. electron-updater downloads the installer and verifies the hash.
+
+## CI latest.yml handling
+
+Each platform's `electron-builder` generates its own `latest.yml` (with only its platform's artifacts). These are renamed to `latest-{windows,macos,linux}.yml` before upload to avoid overwriting during artifact merge. The release job then:
+
+1. Downloads all artifacts
+2. **Recomputes SHA512 directly from the downloaded files** (do NOT trust the yml's old hash — artifact zip transport can change file sizes)
+3. Generates a combined `latest.yml` listing all platform files with correct hashes
+4. Deletes the individual platform ymls
+
+## electron-builder.yml critical fields
+
+- **`productName: "code CN Bridge"`** — spaces cause filename mismatches. Explicit `artifactName` is required:
+  ```yaml
+  win:   { artifactName: "code-CN-Bridge-Setup-${version}.${ext}" }
+  mac:   { artifactName: "code-CN-Bridge-${version}.${ext}" }
+  linux: { artifactName: "code-CN-Bridge-${version}.${ext}" }
+  ```
+- **`publish.repo: codex-cn-bridge`** — NOT `code-cn-bridge`. The GitHub repo was renamed but the code project kept the old name.
+
+## System prompt modification warning
+
+Do NOT inject extra system messages or modify the `instructions` field in `translate_request()`. Attempted identity injection — both as separate system message and appended to instructions — caused complete empty output (`response.completed` with `output: []`) from DeepSeek and GLM models. The heartbeat fires every 15s but no content arrives, suggesting the model's safety filters block all responses when the system prompt is tampered with.
+
+## Config persistence
+
+`config.save()` uses **atomic write** (temp file + `Path.replace()`). This prevents data corruption if the process is killed during save (e.g., during auto-update). The atomic rename ensures either the old or new file is intact, never a half-written file.
+
+## Detailed logging
+
+The desktop Logs page has a "detailed logging" toggle. When enabled, `DetailedLoggingMiddleware` (pure ASGI middleware in `middleware.py`) captures full request/response bodies for `/v1/` endpoints:
+- Truncated at 8KB
+- Auto-cleaned at 100 entries (FIFO)
+- Stored in `StatsCollector._detailed_logs` deque
+- Exposed via `/admin/api/detailed-logs/*` endpoints
+- Renderer displays as expandable formatted JSON cards
