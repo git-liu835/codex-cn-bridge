@@ -240,6 +240,8 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
     # 更新 provider
     if provider_name and provider_name in providers:
         p = providers[provider_name]
+        if "adapter" in data:
+            p["adapter"] = data["adapter"]
         if "base_url" in data:
             logger.info("PUT /models/%s updating base_url: %s → %s", alias, p.get("base_url"), data["base_url"])
             p["base_url"] = data["base_url"]

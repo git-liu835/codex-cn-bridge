@@ -41,6 +41,7 @@ def _setup_logging(verbose: bool = False) -> None:
     root = logging.getLogger("code-cn-bridge")
     root.setLevel(level)
     root.handlers.clear()
+    root.propagate = False  # 防止消息传播到 root logger 导致重复输出
 
     # 控制台 handler
     console = logging.StreamHandler()
@@ -59,8 +60,10 @@ def _setup_logging(verbose: bool = False) -> None:
     # 根 logger 也加上，捕获 uvicorn 等库的日志
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
-    if not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root_logger.handlers):
-        root_logger.addHandler(file_handler)
+    for h in root_logger.handlers:
+        if isinstance(h, logging.handlers.RotatingFileHandler):
+            root_logger.removeHandler(h)
+    root_logger.addHandler(file_handler)
 
 
 def _get_adapter_for_model(model: str) -> tuple[BaseAdapter, str, str, str]:
@@ -406,7 +409,7 @@ def create_app(verbose: bool = False) -> FastAPI:
     app.add_middleware(DetailedLoggingMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "app://."],
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "app://.", "file://", "null"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
