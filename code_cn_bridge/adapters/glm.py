@@ -16,9 +16,15 @@ class GlmAdapter(BaseAdapter):
         chat_req.pop("logprobs", None)
         chat_req.pop("logit_bias", None)
 
-        # 强制禁用 thinking 避免推理循环
-        if "thinking" not in chat_req:
-            chat_req["thinking"] = {"type": "disabled"}
+        # 启用 thinking 模式，利用模型推理能力
+        # reasoning_content 会被 StreamTranslator 转换为 reasoning 输出项
+        # 可通过 model_mapping 中 enable_thinking: false 按模型关闭
+        if "_disable_thinking" in chat_req:
+            chat_req.pop("_disable_thinking")
+            if "thinking" not in chat_req:
+                chat_req["thinking"] = {"type": "disabled"}
+        elif "thinking" not in chat_req:
+            chat_req["thinking"] = {"type": "enabled"}
 
         # do_sample: 智谱默认采样模式
         if "do_sample" not in chat_req:

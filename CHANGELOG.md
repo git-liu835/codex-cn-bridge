@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.3.17 (2026-05-26)
+
+### Features
+
+- **推理模式 (Reasoning)**: 启用 DeepSeek/Kimi/GLM 的 thinking 模式，不再强制禁用。模型的 `reasoning_content` 被正确转换为 Responses API 的 `reasoning` 输出项，Codex 能完整看到模型的思考过程，大幅提升复杂任务和工具调用的准确性。
+- **per-model 推理开关**: `model_mapping` 新增 `enable_thinking` 字段，可按模型单独控制是否启用推理模式。
+
+### Improvements
+
+- **流式自动重试**: 上游连接断开时自动重试一次，防止长时间推理后断连导致对话上下文丢失。
+- **心跳优化**: 流式心跳间隔从 15s 优化到 10s，更快检测断连。
+- **注册表自修复**: Electron 启动时自动维护 Windows 注册表中的 `InstallLocation`，确保自动更新始终找到正确的安装路径。
+
 ## v0.3.16 (2026-05-26)
 
 ### Bug Fixes

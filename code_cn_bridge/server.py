@@ -399,7 +399,7 @@ def create_app(verbose: bool = False) -> FastAPI:
 
     app = FastAPI(
         title="code CN Bridge",
-        version="0.3.16",
+        version="0.3.17",
         description="OpenAI Responses API → Chat Completions API 协议转换代理",
         lifespan=lifespan,
     )
@@ -499,6 +499,15 @@ def create_app(verbose: bool = False) -> FastAPI:
             cfg = get_config()
             chat_req = translate_request(body, adapter, target_model, alias=model)
             has_image_gen = chat_req.pop("_has_image_gen", False)
+
+            # 从 model_mapping 读取 per-model enable_thinking 配置
+            model_entry = cfg.model_mapping.get(model)
+            if isinstance(model_entry, list):
+                model_item = next((e for e in model_entry if e.get("enabled")), model_entry[0] if model_entry else None)
+            else:
+                model_item = model_entry
+            if model_item is not None and not model_item.get("enable_thinking", True):
+                chat_req["_disable_thinking"] = True
 
             # image_gen 内置工具：不转发给 LLM，直接在 bridge 内处理
             if has_image_gen:
@@ -748,8 +757,8 @@ async def _handle_stream(
     try:
         while True:
             try:
-                # 15 秒超时：上游长时间推理时发送心跳保持连接
-                chunk = await asyncio.wait_for(anext(chat_stream), timeout=15.0)
+                # 10 秒超时：上游长时间推理时发送心跳保持连接
+                chunk = await asyncio.wait_for(anext(chat_stream), timeout=10.0)
             except asyncio.TimeoutError:
                 yield ": heartbeat\n\n"
                 continue

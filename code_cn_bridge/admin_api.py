@@ -34,7 +34,7 @@ async def get_status():
         "running": True,
         "host": cfg.server_host,
         "port": cfg.server_port,
-        "version": "0.3.16",
+        "version": "0.3.17",
         "stats": stats.get_summary(),
     }
 
@@ -58,6 +58,7 @@ def _build_model_entry(alias: str, entry: dict, providers: dict, available_adapt
         "api_key_env": provider.get("api_key_env", ""),
         "api_key_set": bool(provider.get("api_key", "")),
         "enabled": entry.get("enabled", True),
+        "enable_thinking": entry.get("enable_thinking", True),
         "is_multimodal": entry.get("is_multimodal", False),
         "vision_alias": entry.get("vision_alias") or "",
         "is_image_gen": entry.get("is_image_gen", False),
@@ -136,6 +137,7 @@ async def add_model(data: dict):
         "target": target,
         "provider": provider_name,
         "enabled": data.get("enabled", True),
+        "enable_thinking": data.get("enable_thinking", True),
         "is_multimodal": data.get("is_multimodal", False),
         "vision_alias": data.get("vision_alias") or None,
         "is_image_gen": data.get("is_image_gen", False),
@@ -206,6 +208,7 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
         "target": target,
         "provider": provider_name,
         "enabled": new_enabled,
+        "enable_thinking": data.get("enable_thinking", old_dict.get("enable_thinking", True)),
         "is_multimodal": data.get("is_multimodal", old_dict.get("is_multimodal", False)),
         "vision_alias": data.get("vision_alias") if "vision_alias" in data else old_dict.get("vision_alias"),
         "is_image_gen": data.get("is_image_gen", old_dict.get("is_image_gen", False)),

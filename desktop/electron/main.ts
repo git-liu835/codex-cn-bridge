@@ -536,9 +536,42 @@ function getAutoStartSetting(): boolean {
   return true;
 }
 
+// ── 维护注册表 InstallLocation ──────────────────────────────────────
+// NSIS 静默安装时通过注册表查找原始安装路径。
+// 如果注册表键缺失或 InstallLocation 为空，更新时会装到默认路径而非用户选择的位置。
+
+function ensureRegistryKey() {
+  if (process.platform !== 'win32') return;
+  try {
+    const installDir = path.dirname(app.getPath('exe'));
+    const displayVersion = app.getVersion();
+    // GUID 由 electron-builder 根据 appId (com.code-cn-bridge.app) 生成，固定不变
+    const guid = '{69bf6637-f80f-5ed3-a42e-764c81b1e2f2}';
+
+    // 用 PowerShell 写入注册表 (避免 cmd.exe 的引号转义问题)
+    const esc = (s: string) => s.replace(/'/g, "''");
+    const psLines = [
+      `$p = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}'`,
+      `New-Item -Path $p -Force | Out-Null`,
+      `Set-ItemProperty -Path $p -Name DisplayName -Value 'code CN Bridge' -Type String -Force`,
+      `Set-ItemProperty -Path $p -Name DisplayVersion -Value '${esc(displayVersion)}' -Type String -Force`,
+      `Set-ItemProperty -Path $p -Name InstallLocation -Value '${esc(installDir)}' -Type String -Force`,
+      `Set-ItemProperty -Path $p -Name UninstallString -Value '${esc(installDir)}\\Uninstall code CN Bridge.exe' -Type String -Force`,
+      `Set-ItemProperty -Path $p -Name Publisher -Value 'git-liu835' -Type String -Force`,
+      `Set-ItemProperty -Path $p -Name DisplayIcon -Value '${esc(installDir)}\\code CN Bridge.exe' -Type String -Force`,
+    ];
+    const psScript = psLines.join('; ');
+    execSync(`powershell -NoProfile -Command "${psScript}"`, { timeout: 10000, stdio: 'pipe' });
+    console.log(`[Registry] InstallLocation maintained: ${installDir}`);
+  } catch (err: any) {
+    console.error('[Registry] Failed to maintain registry key:', err.message);
+  }
+}
+
 app.whenReady().then(() => {
   createTray();
   createWindow();
+  ensureRegistryKey();
   setupAutoUpdater();
   if (getAutoStartSetting()) {
     startBridgeProcess();

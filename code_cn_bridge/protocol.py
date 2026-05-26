@@ -313,6 +313,18 @@ def translate_response(
         msg = choice.get("message", {})
         content = msg.get("content")
         tool_calls = msg.get("tool_calls") or []
+        reasoning_content = msg.get("reasoning_content", "")
+
+        # 推理内容 → reasoning 输出项
+        if reasoning_content:
+            reasoning_id = _uid("reas")
+            output_items.append({
+                "id": reasoning_id,
+                "object": "realtime.item",
+                "type": "reasoning",
+                "status": "completed",
+                "content": [{"type": "summary_text", "text": reasoning_content}],
+            })
 
         # 文本内容
         if content:
@@ -351,6 +363,13 @@ class StreamTranslator:
         self._created_sent = False
         self._done = False
         self._output_index = -1
+
+        # 推理追踪 (reasoning_content → reasoning item)
+        self._reasoning_item_index = -1
+        self._reasoning_item_id = ""
+        self._reasoning_content_index = -1
+        self._reasoning_buf: list[str] = []
+        self._reasoning_started = False
 
         # 文本输出追踪
         self._text_item_index = -1
@@ -410,20 +429,33 @@ class StreamTranslator:
         if finish_reason:
             self._finish_reason = finish_reason
 
-        # 文本增量 (忽略 reasoning_content，仅转发实际 content)
-        # deepseek-v4-pro 等模型在思考阶段产生 reasoning_content，
-        # 这些是模型内部推理，不应转发给 code，否则会造成循环
+        # 推理增量 (reasoning_content → reasoning item)
+        # 将模型的内部推理转换为 Responses API 的 reasoning 输出项，
+        # 让 Codex 能正确展示和使用模型的思考过程
+        reasoning = delta.get("reasoning_content")
+        if reasoning:
+            yield from self._handle_reasoning_delta(reasoning)
+
+        # 当推理结束、实际内容开始时，先关闭推理项
         content = delta.get("content")
         if content:
+            if self._reasoning_started:
+                yield from self._emit_reasoning_done()
             yield from self._handle_text_delta(content)
 
-        # 工具调用增量
+        # 工具调用增量 — 如果之前在推理中，先结束推理
         tool_calls = delta.get("tool_calls", [])
+        if tool_calls:
+            if self._reasoning_started:
+                yield from self._emit_reasoning_done()
+
         for tc in tool_calls:
             yield from self._handle_tool_call_delta(tc)
 
         # 完成
         if finish_reason:
+            if self._reasoning_started:
+                yield from self._emit_reasoning_done()
             yield from self._finish()
 
     def _finish(self) -> list[str]:
@@ -431,6 +463,10 @@ class StreamTranslator:
         if self._done:
             return []
         events: list[str] = []
+
+        # 结束推理项 (如果还在进行中)
+        if self._reasoning_started:
+            events.extend(self._emit_reasoning_done())
 
         # 结束文本项 (如果还在进行中)
         if self._text_started:
@@ -473,6 +509,94 @@ class StreamTranslator:
             })
         )
         self._created_sent = True
+        return events
+
+    def _handle_reasoning_delta(self, reasoning: str) -> list[str]:
+        """将 reasoning_content delta 转换为 Responses API 的 reasoning 输出项"""
+        events = []
+        if not self._reasoning_started:
+            self._output_index += 1
+            self._reasoning_item_index = self._output_index
+            self._reasoning_item_id = _uid("reas")
+            self._reasoning_content_index = 0
+            self._reasoning_buf = []
+            self._reasoning_started = True
+
+            item = {
+                "id": self._reasoning_item_id,
+                "object": "realtime.item",
+                "type": "reasoning",
+                "status": "in_progress",
+                "content": [],
+            }
+            self._output_items.append(item)
+
+            # event: response.output_item.added
+            events.append(
+                _sse_line({
+                    "type": "response.output_item.added",
+                    "output_index": self._reasoning_item_index,
+                    "item": item,
+                })
+            )
+
+            # event: response.reasoning_summary_part.added
+            part = {"type": "summary_text", "text": ""}
+            item["content"].append(part)
+            events.append(
+                _sse_line({
+                    "type": "response.reasoning_summary_part.added",
+                    "output_index": self._reasoning_item_index,
+                    "content_index": self._reasoning_content_index,
+                    "part": part,
+                })
+            )
+
+        self._reasoning_buf.append(reasoning)
+
+        # event: response.reasoning_summary_text.delta
+        events.append(
+            _sse_line({
+                "type": "response.reasoning_summary_text.delta",
+                "output_index": self._reasoning_item_index,
+                "content_index": self._reasoning_content_index,
+                "delta": reasoning,
+            })
+        )
+        return events
+
+    def _emit_reasoning_done(self) -> list[str]:
+        """结束推理输出项"""
+        if not self._reasoning_started:
+            return []
+        events = []
+
+        reasoning_text = "".join(self._reasoning_buf)
+        if self._reasoning_item_index < len(self._output_items):
+            item = self._output_items[self._reasoning_item_index]
+            item["status"] = "completed"
+            if item["content"]:
+                item["content"][0]["text"] = reasoning_text
+
+        # event: response.reasoning_summary_part.done
+        events.append(
+            _sse_line({
+                "type": "response.reasoning_summary_part.done",
+                "output_index": self._reasoning_item_index,
+                "content_index": self._reasoning_content_index,
+                "part": self._output_items[self._reasoning_item_index]["content"][0] if self._reasoning_item_index < len(self._output_items) else {},
+            })
+        )
+
+        # event: response.output_item.done
+        events.append(
+            _sse_line({
+                "type": "response.output_item.done",
+                "output_index": self._reasoning_item_index,
+                "item": self._output_items[self._reasoning_item_index] if self._reasoning_item_index < len(self._output_items) else {},
+            })
+        )
+        self._reasoning_started = False
         return events
 
     def _handle_text_delta(self, content: str) -> list[str]:

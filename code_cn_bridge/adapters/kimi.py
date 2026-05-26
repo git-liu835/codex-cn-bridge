@@ -19,10 +19,16 @@ class KimiAdapter(BaseAdapter):
         chat_req.pop("logit_bias", None)
         chat_req.pop("user", None)
 
-        # Kimi k2.x 默认启用 thinking，但 bridge 无法保证历史消息都有 reasoning_content
-        # 显式禁用 thinking 以避免 "reasoning_content is missing" 错误
-        if "thinking" not in chat_req:
-            chat_req["thinking"] = {"type": "disabled"}
+        # Kimi k2.x 默认启用 thinking，利用模型推理能力
+        # reasoning_content 会被 StreamTranslator 转换为 reasoning 输出项
+        # 历史消息中缺失 reasoning_content 的情况由 _flush_tool_calls 兜底处理
+        # 可通过 model_mapping 中 enable_thinking: false 按模型关闭
+        if "_disable_thinking" in chat_req:
+            chat_req.pop("_disable_thinking")
+            if "thinking" not in chat_req:
+                chat_req["thinking"] = {"type": "disabled"}
+        elif "thinking" not in chat_req:
+            chat_req["thinking"] = {"type": "enabled"}
 
         # 老版本 Kimi 不支持 function calling
         tools = chat_req.get("tools")
