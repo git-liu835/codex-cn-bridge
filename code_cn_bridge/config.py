@@ -152,6 +152,7 @@ class Config:
             entry.setdefault("video_gen_alias", None)
             entry.setdefault("enabled", True)
             entry.setdefault("enable_thinking", True)
+            entry.setdefault("thinking_budget", 4096)
             return entry
 
         for alias, entry in mapping.items():

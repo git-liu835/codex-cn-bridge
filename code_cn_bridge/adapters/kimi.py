@@ -23,12 +23,14 @@ class KimiAdapter(BaseAdapter):
         # reasoning_content 会被 StreamTranslator 转换为 reasoning 输出项
         # 历史消息中缺失 reasoning_content 的情况由 _flush_tool_calls 兜底处理
         # 可通过 model_mapping 中 enable_thinking: false 按模型关闭
+        # budget_tokens 限制推理 token 数，防止模型耗尽所有 token 在推理上
         if "_disable_thinking" in chat_req:
             chat_req.pop("_disable_thinking")
             if "thinking" not in chat_req:
                 chat_req["thinking"] = {"type": "disabled"}
         elif "thinking" not in chat_req:
-            chat_req["thinking"] = {"type": "enabled"}
+            budget = chat_req.pop("_thinking_budget", 4096)
+            chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         # 老版本 Kimi 不支持 function calling
         tools = chat_req.get("tools")

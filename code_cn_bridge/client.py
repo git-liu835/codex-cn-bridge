@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import AsyncIterator
@@ -67,32 +66,12 @@ class UpstreamClient:
         return response.json()
 
     async def chat_completion_stream(self, chat_req: dict) -> AsyncIterator[dict]:
-        """发送流式 Chat Completions 请求，返回 SSE 事件迭代器
+        """发送流式 Chat Completions 请求，返回 SSE 事件迭代器（单次，不重试）
 
-        带有自动重试：临时网络错误（连接重置、超时）时重试一次，
-        防止模型长时间推理后连接断开导致对话上下文丢失。
+        重试逻辑由调用方（server.py）处理，确保每次重试可以重建 StreamTranslator。
         """
-        last_error: Exception | None = None
-        for attempt in range(2):
-            try:
-                async for chunk in self._stream_once(chat_req):
-                    yield chunk
-                return  # 成功完成，退出重试循环
-            except (httpx.RemoteProtocolError, httpx.ReadTimeout,
-                    httpx.ConnectTimeout, httpx.ConnectError,
-                    ConnectionResetError, ConnectionAbortedError) as exc:
-                last_error = exc
-                if attempt == 0:
-                    logger.warning("流式连接断开，1秒后重试: %s", exc)
-                    await asyncio.sleep(1)
-                    # 重建客户端以避免复用已断开的连接
-                    if self._stream_client:
-                        await self._stream_client.aclose()
-                        self._stream_client = None
-                else:
-                    raise  # 两次都失败，抛出
-        if last_error:
-            raise last_error
+        async for chunk in self._stream_once(chat_req):
+            yield chunk
 
     async def _stream_once(self, chat_req: dict) -> AsyncIterator[dict]:
         """单次流式请求"""

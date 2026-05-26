@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .config import get_config, reload_config
 from .adapters import get_registry
 from .adapters.base import BaseAdapter
-from .protocol import translate_request, translate_response, StreamTranslator
+from .protocol import translate_request, translate_response, StreamTranslator, _sse_line
 from .client import UpstreamClient
 from .middleware import (
     ErrorHandlingMiddleware,
@@ -500,14 +500,17 @@ def create_app(verbose: bool = False) -> FastAPI:
             chat_req = translate_request(body, adapter, target_model, alias=model)
             has_image_gen = chat_req.pop("_has_image_gen", False)
 
-            # 从 model_mapping 读取 per-model enable_thinking 配置
+            # 从 model_mapping 读取 per-model thinking 配置
             model_entry = cfg.model_mapping.get(model)
             if isinstance(model_entry, list):
                 model_item = next((e for e in model_entry if e.get("enabled")), model_entry[0] if model_entry else None)
             else:
                 model_item = model_entry
-            if model_item is not None and not model_item.get("enable_thinking", True):
-                chat_req["_disable_thinking"] = True
+            if model_item is not None:
+                if not model_item.get("enable_thinking", True):
+                    chat_req["_disable_thinking"] = True
+                if "thinking_budget" in model_item:
+                    chat_req["_thinking_budget"] = model_item["thinking_budget"]
 
             # image_gen 内置工具：不转发给 LLM，直接在 bridge 内处理
             if has_image_gen:
@@ -749,43 +752,81 @@ async def _handle_stream(
     provider: str = "",
     target_model: str = "",
 ):
-    """处理流式请求: 上游 Chat SSE → 适配器变换 → 协议转换 → Responses SSE"""
-    translator = StreamTranslator(model=model)
+    """处理流式请求: 上游 Chat SSE → 适配器变换 → 协议转换 → Responses SSE
+
+    支持自动重试一次：上游连接断开时重建连接和 StreamTranslator，
+    避免 translator 状态污染导致 Codex 收到混乱的 SSE 事件流。
+    """
+    import httpx
+
+    RETRYABLE = (
+        httpx.RemoteProtocolError, httpx.ReadTimeout,
+        httpx.ConnectTimeout, httpx.ConnectError,
+        ConnectionResetError, ConnectionAbortedError,
+    )
+
     stream_error = ""
-    chat_stream = client.chat_completion_stream(chat_req)
+    for attempt in range(2):
+        translator = StreamTranslator(model=model)
+        chat_stream = client.chat_completion_stream(chat_req)
 
-    try:
-        while True:
-            try:
-                # 10 秒超时：上游长时间推理时发送心跳保持连接
-                chunk = await asyncio.wait_for(anext(chat_stream), timeout=10.0)
-            except asyncio.TimeoutError:
-                yield ": heartbeat\n\n"
-                continue
-            except StopAsyncIteration:
-                break
-
-            # 适配器流事件变换
-            chunk = adapter.stream_event_transform(chunk)
-
-            if verbose:
-                _safe_log("Chat chunk", chunk)
-
-            # 协议转换
-            for event_line in translator.translate_chunk(chunk):
-                yield event_line
-
-    except Exception as exc:
-        stream_error = str(exc)
-        logger.exception("流式处理异常")
-
-    # 仅在流正常结束时发送 response.completed（异常时连接可能已断开）
-    if not stream_error:
         try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(anext(chat_stream), timeout=10.0)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                except StopAsyncIteration:
+                    break
+
+                chunk = adapter.stream_event_transform(chunk)
+
+                if verbose:
+                    _safe_log("Chat chunk", chunk)
+
+                for event_line in translator.translate_chunk(chunk):
+                    yield event_line
+
+            # 流正常结束，发送 response.completed
             for event_line in translator._finish():
                 yield event_line
+            stream_error = ""
+            break  # 成功，退出重试循环
+
+        except RETRYABLE as exc:
+            stream_error = str(exc)
+            if attempt == 0:
+                logger.warning("流式连接断开，1秒后重试: %s", exc)
+                await asyncio.sleep(1)
+                if client._stream_client:
+                    await client._stream_client.aclose()
+                    client._stream_client = None
+                continue
+            else:
+                logger.exception("流式处理异常（重试失败）")
+
+        except Exception as exc:
+            stream_error = str(exc)
+            logger.exception("流式处理异常")
+            break
+
+    # 流异常结束时发送 error 事件，让 Codex 知道请求已终止
+    if stream_error:
+        try:
+            yield _sse_line(build_error_response(stream_error))
+            yield _sse_line({
+                "type": "response.completed",
+                "response": {
+                    "id": translator.response_id,
+                    "object": "response",
+                    "model": model,
+                    "status": "failed",
+                    "output": translator._output_items,
+                },
+            })
         except Exception:
-            pass  # 客户端已断开连接
+            pass
 
     if stream_error:
         _record_request(start_time, model, "responses", 500, True, stream_error, provider=provider, target_model=target_model)

@@ -19,12 +19,14 @@ class GlmAdapter(BaseAdapter):
         # 启用 thinking 模式，利用模型推理能力
         # reasoning_content 会被 StreamTranslator 转换为 reasoning 输出项
         # 可通过 model_mapping 中 enable_thinking: false 按模型关闭
+        # budget_tokens 限制推理 token 数，防止模型耗尽所有 token 在推理上
         if "_disable_thinking" in chat_req:
             chat_req.pop("_disable_thinking")
             if "thinking" not in chat_req:
                 chat_req["thinking"] = {"type": "disabled"}
         elif "thinking" not in chat_req:
-            chat_req["thinking"] = {"type": "enabled"}
+            budget = chat_req.pop("_thinking_budget", 4096)
+            chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         # do_sample: 智谱默认采样模式
         if "do_sample" not in chat_req:
