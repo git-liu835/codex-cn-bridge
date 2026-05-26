@@ -165,7 +165,6 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'code CN Bridge',
-    icon: nativeImage.createEmpty(),
     backgroundColor: '#0f1117',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
