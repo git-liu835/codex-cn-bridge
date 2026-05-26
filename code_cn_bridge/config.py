@@ -281,15 +281,21 @@ class Config:
         return next(iter(enabled), None) if enabled else None
 
     def _get_default_model(self, provider_name: str) -> str:
-        """获取 provider 的默认模型名，取 mapping 中第一个匹配的"""
+        """获取 provider 的默认模型名，取 mapping 中第一个匹配的（支持多模型列表）"""
         mapping = self.model_mapping
-        pname = provider_name
         for alias, entry in mapping.items():
-            target = entry.get("target", entry) if isinstance(entry, dict) else entry
-            found = self._find_provider_for_target(target)
-            if found == pname:
-                return target
-        return pname  # fallback
+            if isinstance(entry, list):
+                for item in entry:
+                    target = item.get("target", alias)
+                    found = self._find_provider_for_target(target)
+                    if found == provider_name:
+                        return target
+            elif isinstance(entry, dict):
+                target = entry.get("target", alias)
+                found = self._find_provider_for_target(target)
+                if found == provider_name:
+                    return target
+        return provider_name  # fallback
 
     # ── 生成默认配置 ─────────────────────────────────────────────
 
