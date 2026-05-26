@@ -9,7 +9,7 @@ import click
 
 
 @click.group()
-@click.version_option(version="0.3.14", prog_name="code-cn-bridge")
+@click.version_option(version="0.3.15", prog_name="code-cn-bridge")
 def main():
     """code CN Bridge - 国产模型本地代理
 
@@ -57,7 +57,7 @@ def start(config: str | None, port: int | None, host: str | None, verbose: bool)
     bind_host = host or cfg.server_host
     bind_port = port or cfg.server_port
 
-    click.echo(f"code CN Bridge v0.3.14")
+    click.echo(f"code CN Bridge v0.3.15")
     click.echo(f"服务地址: http://{bind_host}:{bind_port}")
     click.echo(f"配置文件: {cfg._config_path or '默认'}")
 
