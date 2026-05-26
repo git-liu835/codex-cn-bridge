@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
 
 from .config import get_config
 from .adapters import get_registry
@@ -74,7 +74,7 @@ def _build_model_entry(alias: str, entry: dict, providers: dict, available_adapt
 
 
 @router.get("/models")
-async def list_models():
+async def list_models(response: Response):
     """获取所有模型配置（多模型列表条目已展开）"""
     cfg = get_config()
     reg = get_registry()
@@ -91,6 +91,7 @@ async def list_models():
                     index=i, active=item.get("enabled", False)))
         elif isinstance(entry, dict):
             models.append(_build_model_entry(alias, entry, providers, adapters))
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return {"models": models}
 
 
@@ -176,6 +177,8 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
         return {"error": f"模型别名 '{alias}' 不存在"}, 404
 
     raw_entry = mapping[alias]
+    logger.info("PUT /models/%s _index=%s type=%s data_keys=%s",
+        alias, _index, type(raw_entry).__name__, list(data.keys()))
 
     # 定位要更新的条目
     if isinstance(raw_entry, list):
@@ -198,10 +201,11 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
             provider_name = found
 
     old_dict = old_entry if isinstance(old_entry, dict) else {}
+    new_enabled = data.get("enabled", old_dict.get("enabled", True))
     updated_entry = {
         "target": target,
         "provider": provider_name,
-        "enabled": data.get("enabled", old_dict.get("enabled", True)),
+        "enabled": new_enabled,
         "is_multimodal": data.get("is_multimodal", old_dict.get("is_multimodal", False)),
         "vision_alias": data.get("vision_alias") if "vision_alias" in data else old_dict.get("vision_alias"),
         "is_image_gen": data.get("is_image_gen", old_dict.get("is_image_gen", False)),
@@ -210,8 +214,11 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
         "video_gen_alias": data.get("video_gen_alias") if "video_gen_alias" in data else old_dict.get("video_gen_alias"),
     }
 
+    logger.info("PUT /models/%s old=(target=%s provider=%s enabled=%s) → new=(target=%s provider=%s enabled=%s)",
+        alias, old_target, old_dict.get("provider",""), old_dict.get("enabled",""),
+        target, provider_name, new_enabled)
+
     # 更新：如果本条目被启用，禁用同 alias 其他条目
-    # 如果本条目被禁用，且是唯一的启用条目，则启用第一个其他条目
     if isinstance(raw_entry, list):
         if updated_entry["enabled"]:
             for i, e in enumerate(raw_entry):
@@ -220,7 +227,6 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
         else:
             other_enabled = any(e.get("enabled") for i, e in enumerate(raw_entry) if i != _index)
             if not other_enabled and len(raw_entry) > 1:
-                # 找到第一个不是本索引的条目并启用
                 for i, e in enumerate(raw_entry):
                     if i != _index:
                         e["enabled"] = True
@@ -235,6 +241,7 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
     if provider_name and provider_name in providers:
         p = providers[provider_name]
         if "base_url" in data:
+            logger.info("PUT /models/%s updating base_url: %s → %s", alias, p.get("base_url"), data["base_url"])
             p["base_url"] = data["base_url"]
         if "api_key" in data and data["api_key"]:
             p["api_key"] = data["api_key"]
@@ -251,6 +258,7 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
             p["extra_headers"] = advanced.get("extra_headers", p.get("extra_headers", {}))
 
     cfg.save()
+    logger.info("PUT /models/%s saved successfully", alias)
     return {"status": "ok", "alias": alias}
 
 
