@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.16 (2026-05-26)
+
+### Bug Fixes
+
+- **别名重命名不生效**: 编辑模型卡片时修改 alias 字段，后端始终用 URL 路径的旧键名保存，导致重命名无法持久化。现在 `update_model` 支持三种重命名场景：简单重命名、合并到已有别名、从多模型列表提取单个条目。
+- **adapter 字段被忽略**: `update_model` 未处理 `adapter` 字段，编辑卡片时修改适配器不生效。
+- **CORS 预检失败**: Electron 生产模式使用 `file://` 来源，CORS 允许列表缺失导致 PUT 请求预检返回 400。
+- **日志重复**: package logger 和 root logger 都往 `bridge.log` 写入，导致每条日志出现两次。
+
 ## v0.3.15 (2026-05-26)
 
 ### Features
