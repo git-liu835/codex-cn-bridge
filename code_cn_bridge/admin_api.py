@@ -232,10 +232,57 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
                         e["enabled"] = True
                         break
 
-    if isinstance(raw_entry, list):
-        raw_entry[_index] = updated_entry
+    # 处理别名重命名
+    new_alias = data.get("alias", "").strip()
+    effective_alias = alias
+    if new_alias and new_alias != alias:
+        # 确定要移动的条目
+        if isinstance(raw_entry, list) and _index is not None:
+            moving_entry = updated_entry  # 单个条目移出
+            remaining = [e for i, e in enumerate(raw_entry) if i != _index]
+        else:
+            moving_entry = None  # 移动整个 raw_entry
+            remaining = None
+
+        if new_alias in mapping:
+            # 目标已存在 → 合并
+            if moving_entry:
+                moving_entry["enabled"] = False
+            existing = mapping[new_alias]
+            if isinstance(existing, list):
+                if moving_entry:
+                    existing.append(moving_entry)
+                else:
+                    existing.extend(raw_entry)
+            else:
+                if moving_entry:
+                    mapping[new_alias] = [existing, moving_entry]
+                else:
+                    mapping[new_alias] = [existing] + (raw_entry if isinstance(raw_entry, list) else [raw_entry])
+        else:
+            if moving_entry:
+                mapping[new_alias] = moving_entry
+            elif isinstance(raw_entry, list):
+                mapping[new_alias] = raw_entry
+            else:
+                mapping[new_alias] = updated_entry
+
+        # 从旧键名移除
+        if moving_entry:
+            if len(remaining) == 1:
+                mapping[alias] = remaining[0]
+            elif len(remaining) == 0:
+                del mapping[alias]
+            else:
+                mapping[alias] = remaining
+        else:
+            del mapping[alias]
+        effective_alias = new_alias
     else:
-        mapping[alias] = updated_entry
+        if isinstance(raw_entry, list):
+            raw_entry[_index] = updated_entry
+        else:
+            mapping[alias] = updated_entry
 
     # 更新 provider
     if provider_name and provider_name in providers:
@@ -260,8 +307,8 @@ async def update_model(alias: str, data: dict, _index: int | None = None):
             p["extra_headers"] = advanced.get("extra_headers", p.get("extra_headers", {}))
 
     cfg.save()
-    logger.info("PUT /models/%s saved successfully", alias)
-    return {"status": "ok", "alias": alias}
+    logger.info("PUT /models/%s saved successfully (effective=%s)", alias, effective_alias)
+    return {"status": "ok", "alias": effective_alias}
 
 
 @router.delete("/models/{alias}")
