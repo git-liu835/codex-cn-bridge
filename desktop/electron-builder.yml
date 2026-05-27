@@ -38,8 +38,9 @@ linux:
   maintainer: git-liu835
 
 nsis:
-  oneClick: false
-  allowToChangeInstallationDirectory: true
+  oneClick: true
+  allowToChangeInstallationDirectory: false
+  perMachine: false
   createDesktopShortcut: true
   shortcutName: code CN Bridge
 
