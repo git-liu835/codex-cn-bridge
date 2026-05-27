@@ -766,50 +766,41 @@ async def _handle_stream(
     )
 
     stream_error = ""
-    for attempt in range(2):
-        translator = StreamTranslator(model=model)
-        chat_stream = client.chat_completion_stream(chat_req)
+    translator = StreamTranslator(model=model)
+    chat_stream = client.chat_completion_stream(chat_req)
 
-        try:
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(anext(chat_stream), timeout=10.0)
-                except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
-                    continue
-                except StopAsyncIteration:
-                    break
-
-                chunk = adapter.stream_event_transform(chunk)
-
-                if verbose:
-                    _safe_log("Chat chunk", chunk)
-
-                for event_line in translator.translate_chunk(chunk):
-                    yield event_line
-
-            # 流正常结束，发送 response.completed
-            for event_line in translator._finish():
-                yield event_line
-            stream_error = ""
-            break  # 成功，退出重试循环
-
-        except RETRYABLE as exc:
-            stream_error = str(exc)
-            if attempt == 0:
-                logger.warning("流式连接断开，1秒后重试: %s", exc)
-                await asyncio.sleep(1)
-                if client._stream_client:
-                    await client._stream_client.aclose()
-                    client._stream_client = None
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(anext(chat_stream), timeout=10.0)
+            except asyncio.TimeoutError:
+                yield ": heartbeat\n\n"
                 continue
-            else:
-                logger.exception("流式处理异常（重试失败）")
+            except StopAsyncIteration:
+                break
 
-        except Exception as exc:
-            stream_error = str(exc)
-            logger.exception("流式处理异常")
-            break
+            chunk = adapter.stream_event_transform(chunk)
+
+            if verbose:
+                _safe_log("Chat chunk", chunk)
+
+            for event_line in translator.translate_chunk(chunk):
+                yield event_line
+
+        # 流正常结束，发送 response.completed
+        for event_line in translator._finish():
+            yield event_line
+
+    except RETRYABLE as exc:
+        stream_error = str(exc)
+        logger.warning("流式连接断开: %s", exc)
+        if client._stream_client:
+            await client._stream_client.aclose()
+            client._stream_client = None
+
+    except Exception as exc:
+        stream_error = str(exc)
+        logger.exception("流式处理异常")
 
     # 流异常结束时发送 error 事件，让 Codex 知道请求已终止
     if stream_error:
