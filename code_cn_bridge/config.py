@@ -82,11 +82,11 @@ class Config:
             if self._config_path:
                 self._config_path.parent.mkdir(parents=True, exist_ok=True)
                 data = self._data.copy()
-                # 仅移除来自环境变量的 api_key（有 api_key_env 的），保留直接配置的
+                # 仅移除来自环境变量的 api_key，保留用户手动配置的
                 env_api_keys = {}
                 for name, info in data.get("providers", {}).items():
-                    if "api_key" in info and info.get("api_key_env", ""):
-                        env_api_keys[name] = info.pop("api_key")
+                    if info.pop("_api_key_from_env", False):
+                        env_api_keys[name] = info.pop("api_key", "")
                 yaml_str = yaml.dump(data, allow_unicode=True, default_flow_style=False)
                 # 原子写入：先写临时文件，再 rename 替换（同分区内 rename 是原子的）
                 tmp_path = self._config_path.with_suffix(".tmp")
@@ -125,6 +125,7 @@ class Config:
                 env_val = os.environ.get(env_var, "")
                 if env_val:
                     info["api_key"] = env_val
+                    info["_api_key_from_env"] = True
                 elif "api_key" not in info:
                     info["api_key"] = ""
             elif "api_key" not in info:

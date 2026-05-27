@@ -57,8 +57,13 @@ const Settings: React.FC = () => {
     }
   };
 
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
   const handleImport = async () => {
-    if (!importYaml.trim()) return;
+    if (!importYaml.trim()) {
+      alert(tl('settings.emptyYaml'));
+      return;
+    }
     try {
       const result = await api.importConfig(importYaml);
       if (result.error) {
@@ -74,16 +79,29 @@ const Settings: React.FC = () => {
   };
 
   const handleSelectFile = async () => {
-    try {
-      if (window.electronAPI) {
+    if (window.electronAPI) {
+      try {
         const filePath = await window.electronAPI.selectFile({ filters: [{ name: 'YAML', extensions: ['yaml', 'yml'] }] });
         if (filePath) {
           const res = await fetch(`file://${filePath}`);
           const text = await res.text();
           setImportYaml(text);
         }
+      } catch (err: any) {
+        alert(tl('common.error') + ': ' + (err.message || err));
       }
-    } catch { /* fallback */ }
+    } else {
+      fileInputRef.current?.click();
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setImportYaml(reader.result as string);
+    reader.onerror = () => alert(tl('common.error') + ': ' + (reader.error?.message || ''));
+    reader.readAsText(file);
   };
 
   return (
@@ -170,6 +188,8 @@ const Settings: React.FC = () => {
             <textarea value={importYaml} onChange={e => setImportYaml(e.target.value)}
               rows={6} placeholder="YAML..."
               style={{ fontFamily: 'monospace', fontSize: '13px' }} />
+            <input ref={fileInputRef} type="file" accept=".yaml,.yml"
+              style={{ display: 'none' }} onChange={handleFileChange} />
             <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
               <button className="btn btn-sm" onClick={handleSelectFile}>{tl('settings.selectFile')}</button>
               <button className="btn btn-sm btn-primary" onClick={handleImport}>{tl('settings.importBtn')}</button>
