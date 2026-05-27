@@ -668,6 +668,15 @@ class StreamTranslator:
             if item["content"]:
                 item["content"][0]["text"] = self._accumulated_text
 
+        # event: response.content_part.done — 必须发出，让 Codex 确认文本接收完毕
+        events.append(
+            _sse_line({
+                "type": "response.content_part.done",
+                "output_index": self._text_item_index,
+                "content_index": self._text_content_index,
+                "part": self._output_items[self._text_item_index]["content"][0] if self._text_item_index < len(self._output_items) else {},
+            })
+        )
         # event: response.output_item.done
         events.append(
             _sse_line({
@@ -754,13 +763,25 @@ class StreamTranslator:
         if item_idx < len(self._output_items):
             self._output_items[item_idx]["status"] = "completed"
 
-        return [
+        events = []
+        # response.function_call_arguments.done — 必须发出，让 Codex 确认参数接收完毕
+        events.append(
+            _sse_line({
+                "type": "response.function_call_arguments.done",
+                "output_index": item_idx,
+                "call_id": buf["call_id"],
+                "arguments": buf["arguments"],
+            })
+        )
+        # response.output_item.done
+        events.append(
             _sse_line({
                 "type": "response.output_item.done",
                 "output_index": item_idx,
                 "item": self._output_items[item_idx] if item_idx < len(self._output_items) else {},
             })
-        ]
+        )
+        return events
 
 
 def _sse_line(data: dict) -> str:
