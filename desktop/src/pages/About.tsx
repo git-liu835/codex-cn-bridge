@@ -134,14 +134,14 @@ const About: React.FC = () => {
         <div className="about-links">
           <a href="#" onClick={(e) => {
             e.preventDefault();
-            window.electronAPI?.openExternal('https://github.com/git-liu835/code-cn-bridge');
+            window.electronAPI?.openExternal('https://github.com/git-liu835/codex-cn-bridge');
           }}>
             项目主页
           </a>
           <span className="separator">|</span>
           <a href="#" onClick={(e) => {
             e.preventDefault();
-            window.electronAPI?.openExternal('https://github.com/git-liu835/code-cn-bridge/issues');
+            window.electronAPI?.openExternal('https://github.com/git-liu835/codex-cn-bridge/issues');
           }}>
             问题反馈
           </a>

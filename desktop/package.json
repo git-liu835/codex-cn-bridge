@@ -1,9 +1,9 @@
 {
   "name": "code-cn-bridge-desktop",
-  "version": "0.3.17",
+  "version": "0.3.18",
   "description": "code CN Bridge Desktop - 国产模型本地代理桌面管理工具",
   "author": "git-liu835 <git-liu835@users.noreply.github.com>",
-  "homepage": "https://github.com/git-liu835/code-cn-bridge",
+  "homepage": "https://github.com/git-liu835/codex-cn-bridge",
   "license": "MIT",
   "main": "dist-electron/main.js",
   "scripts": {
