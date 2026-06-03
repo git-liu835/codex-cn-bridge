@@ -34,7 +34,7 @@ async def get_status():
         "running": True,
         "host": cfg.server_host,
         "port": cfg.server_port,
-        "version": "1.0.0",
+        "version": "0.3.22",
         "stats": stats.get_summary(),
     }
 

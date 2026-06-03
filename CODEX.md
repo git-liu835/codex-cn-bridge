@@ -172,7 +172,7 @@ Each adapter has `supports_thinking_budget: bool`:
 
 `enable_thinking: false` in model config sends `thinking: {type: "disabled"}` and removes the max_tokens floor.
 
-### Empty content retry + Budget rectifier (v2.1+)
+### Empty content retry + Budget rectifier (v0.3.22+)
 
 `server.py:_handle_stream()` detects two model failure modes and auto-recovers:
 

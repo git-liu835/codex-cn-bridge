@@ -4,4 +4,4 @@ code CN Bridge - 本地代理工具
 使 code CLI 无缝接入通义千问、DeepSeek、Kimi 等国产大模型。
 """
 
-__version__ = "1.0.0"
+__version__ = "0.3.22"
