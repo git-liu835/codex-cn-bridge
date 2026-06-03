@@ -57,3 +57,5 @@ cc-switch/
 
 # Internal dev docs (not for public repo)
 CODEX.md
+CHANGELOG.md
+CLAUDE.md
