@@ -54,3 +54,6 @@ cc-switch/
 
 # Root package.json (not the desktop one)
 /package.json
+
+# Internal dev docs (not for public repo)
+CODEX.md
