@@ -12,6 +12,8 @@ class KimiAdapter(BaseAdapter):
     name = "kimi"
     base_url = "https://api.moonshot.cn/v1"
     api_key_env = "KIMI_API_KEY"
+    unsupported_features: set[str] = set()
+    supports_thinking_budget: bool = False  # Kimi 仅支持 thinking 开关，不支持 budget_tokens
 
     def preprocess_chat_request(self, chat_req: dict) -> dict:
         # Kimi 不支持 logprobs 和 logit_bias
@@ -29,8 +31,16 @@ class KimiAdapter(BaseAdapter):
             if "thinking" not in chat_req:
                 chat_req["thinking"] = {"type": "disabled"}
         elif "thinking" not in chat_req:
-            budget = chat_req.pop("_thinking_budget", 4096)
-            chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            if self.supports_thinking_budget:
+                budget = chat_req.pop("_thinking_budget", 4096)
+                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            else:
+                chat_req.pop("_thinking_budget", None)
+                chat_req["thinking"] = {"type": "enabled"}
+                # 确保 max_tokens 足够容纳 thinking + 实际输出
+                cur_max = chat_req.get("max_tokens", 0)
+                if not cur_max or cur_max < 16384:
+                    chat_req["max_tokens"] = 16384
 
         # 老版本 Kimi 不支持 function calling
         tools = chat_req.get("tools")

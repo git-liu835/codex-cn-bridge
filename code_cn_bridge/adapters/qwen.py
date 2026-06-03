@@ -12,6 +12,8 @@ class QwenAdapter(BaseAdapter):
     name = "qwen"
     base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key_env = "QWEN_API_KEY"
+    unsupported_features: set[str] = set()  # Qwen3 对 Chat API 支持完整
+    supports_thinking_budget: bool = False  # Qwen3 仅支持 thinking 开关，不支持 budget_tokens
 
     def preprocess_chat_request(self, chat_req: dict) -> dict:
         # 移除千问不支持的字段
@@ -23,6 +25,26 @@ class QwenAdapter(BaseAdapter):
         stop = chat_req.get("stop")
         if isinstance(stop, list):
             chat_req["stop"] = stop  # 千问支持列表
+
+        # Qwen3 支持 thinking 开关（Qwen3-235B-A22B-Thinking 等）
+        # 可通过 model_mapping 中 enable_thinking: false 按模型关闭
+        if "_disable_thinking" in chat_req:
+            chat_req.pop("_disable_thinking")
+            chat_req.pop("_thinking_budget", None)
+            if "thinking" not in chat_req:
+                chat_req["thinking"] = {"type": "disabled"}
+        elif "thinking" not in chat_req:
+            if self.supports_thinking_budget:
+                budget = chat_req.pop("_thinking_budget", 4096)
+                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            else:
+                chat_req.pop("_thinking_budget", None)
+                chat_req["thinking"] = {"type": "enabled"}
+                # 确保 max_tokens 足够容纳 thinking + 实际输出
+                cur_max = chat_req.get("max_tokens", 0)
+                if not cur_max or cur_max < 16384:
+                    chat_req["max_tokens"] = 16384
+
         return chat_req
 
     def postprocess_chat_response(self, chat_resp: dict) -> dict:

@@ -543,15 +543,29 @@ function getAutoStartSetting(): boolean {
 function ensureRegistryKey() {
   if (process.platform !== 'win32') return;
   try {
-    const installDir = path.dirname(app.getPath('exe'));
+    const currentDir = path.dirname(app.getPath('exe'));
     const displayVersion = app.getVersion();
     // GUID 由 electron-builder 根据 appId (com.code-cn-bridge.app) 生成，固定不变
     const guid = '{69bf6637-f80f-5ed3-a42e-764c81b1e2f2}';
-
-    // 用 PowerShell 写入注册表 (避免 cmd.exe 的引号转义问题)
     const esc = (s: string) => s.replace(/'/g, "''");
+
+    // 先读取注册表中已有的 InstallLocation，避免用临时目录覆盖真实安装路径
+    const keyPath = `HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}`;
+    let installDir = currentDir;
+    try {
+      const existingLoc = execSync(
+        `powershell -NoProfile -Command "(Get-ItemProperty -Path '${keyPath}' -Name InstallLocation -EA SilentlyContinue).InstallLocation"`,
+        { timeout: 5000, stdio: 'pipe' }
+      ).toString().trim();
+      if (existingLoc && !existingLoc.includes('\\Temp\\') && !existingLoc.includes('\\temp\\')) {
+        installDir = existingLoc;
+      }
+    } catch {
+      // 注册表项不存在，使用当前路径
+    }
+
     const psLines = [
-      `$p = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}'`,
+      `$p = '${keyPath}'`,
       `New-Item -Path $p -Force | Out-Null`,
       `Set-ItemProperty -Path $p -Name DisplayName -Value 'code CN Bridge' -Type String -Force`,
       `Set-ItemProperty -Path $p -Name DisplayVersion -Value '${esc(displayVersion)}' -Type String -Force`,

@@ -14,21 +14,39 @@ logger = logging.getLogger(__name__)
 
 
 class UpstreamClient:
-    """上游模型 API 异步客户端"""
+    """上游模型 API 异步客户端 —— 支持多 key 轮转"""
 
-    def __init__(self, adapter: BaseAdapter, api_key: str, timeout: float = 120.0, stream_timeout: float = 600.0):
+    def __init__(self, adapter: BaseAdapter, api_keys: list[str], timeout: float = 120.0, stream_timeout: float = 600.0):
         self.adapter = adapter
-        self.api_key = api_key
+        self._api_keys = api_keys if isinstance(api_keys, list) else [api_keys]
+        self._key_index = 0
         self._client: httpx.AsyncClient | None = None
         self._stream_client: httpx.AsyncClient | None = None
         self._timeout = timeout
         self._stream_timeout = stream_timeout
+
+    @property
+    def current_key(self) -> str:
+        return self._api_keys[self._key_index] if self._api_keys else ""
+
+    def rotate_key(self) -> str:
+        """轮转到下一个 API key，返回新的 key"""
+        if len(self._api_keys) <= 1:
+            return self.current_key
+        self._key_index = (self._key_index + 1) % len(self._api_keys)
+        logger.info("API key 轮转: provider=%s, key_index=%d/%d",
+            self.adapter.name, self._key_index + 1, len(self._api_keys))
+        # 轮转时重置 HTTP 客户端（不同 key 不应复用连接）
+        self._client = None
+        self._stream_client = None
+        return self.current_key
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
                 limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+                trust_env=False,  # 绕过系统代理，直连 API
             )
         return self._client
 
@@ -38,6 +56,7 @@ class UpstreamClient:
             self._stream_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(connect=30.0, read=self._stream_timeout, write=30.0, pool=30.0),
                 limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+                trust_env=False,  # 绕过系统代理，直连 API
             )
         return self._stream_client
 
@@ -53,13 +72,15 @@ class UpstreamClient:
         """发送非流式 Chat Completions 请求"""
         client = await self._get_client()
         url = self.adapter.build_chat_url()
-        headers = self.adapter.get_headers(self.api_key)
+        headers = self.adapter.get_headers(self.current_key)
 
         response = await client.post(url, json=chat_req, headers=headers)
         if response.status_code >= 400:
             body = await response.aread()
+            from .models import normalize_upstream_error
+            err_msg = normalize_upstream_error(body.decode(), response.status_code)
             raise httpx.HTTPStatusError(
-                f"Upstream {response.status_code}: {body.decode()[:500]}",
+                err_msg,
                 request=response.request,
                 response=response,
             )
@@ -77,14 +98,16 @@ class UpstreamClient:
         """单次流式请求"""
         client = await self._get_stream_client()
         url = self.adapter.build_chat_url()
-        headers = self.adapter.get_headers(self.api_key)
+        headers = self.adapter.get_headers(self.current_key)
         chat_req["stream"] = True
 
         async with client.stream("POST", url, json=chat_req, headers=headers) as response:
             if response.status_code >= 400:
                 body = await response.aread()
+                from .models import normalize_upstream_error
+                err_msg = normalize_upstream_error(body.decode(), response.status_code)
                 raise httpx.HTTPStatusError(
-                    f"Upstream {response.status_code}: {body.decode()[:500]}",
+                    err_msg,
                     request=response.request,
                     response=response,
                 )

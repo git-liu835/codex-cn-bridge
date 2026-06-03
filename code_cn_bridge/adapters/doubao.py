@@ -15,6 +15,8 @@ class DoubaoAdapter(BaseAdapter):
     name = "doubao"
     base_url = "https://ark.cn-beijing.volces.com/api/v3"
     api_key_env = "ARK_API_KEY"
+    unsupported_features: set[str] = set()  # 豆包对 Chat API 支持完整
+    supports_thinking_budget: bool = False  # 豆包仅支持 thinking 开关，不支持 budget_tokens
 
     def preprocess_image_gen_request(self, req: dict) -> dict:
         """DALL-E 兼容格式 + Seedream 扩展参数
@@ -43,6 +45,25 @@ class DoubaoAdapter(BaseAdapter):
         stop = chat_req.get("stop")
         if isinstance(stop, list) and len(stop) > 4:
             chat_req["stop"] = stop[:4]
+
+        # 豆包支持 thinking 开关（Doubao-1.5-Thinking-Pro 等）
+        # 可通过 model_mapping 中 enable_thinking: false 按模型关闭
+        if "_disable_thinking" in chat_req:
+            chat_req.pop("_disable_thinking")
+            chat_req.pop("_thinking_budget", None)
+            if "thinking" not in chat_req:
+                chat_req["thinking"] = {"type": "disabled"}
+        elif "thinking" not in chat_req:
+            if self.supports_thinking_budget:
+                budget = chat_req.pop("_thinking_budget", 4096)
+                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            else:
+                chat_req.pop("_thinking_budget", None)
+                chat_req["thinking"] = {"type": "enabled"}
+                # 确保 max_tokens 足够容纳 thinking + 实际输出
+                cur_max = chat_req.get("max_tokens", 0)
+                if not cur_max or cur_max < 16384:
+                    chat_req["max_tokens"] = 16384
 
         # 工具格式规范化
         tools = chat_req.get("tools")

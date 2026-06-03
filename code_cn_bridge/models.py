@@ -67,6 +67,10 @@ class ResponsesRequest(BaseModel):
     tools: list[dict[str, Any]] | None = None
     tool_choice: str | dict | None = "auto"
     previous_response_id: str | None = None
+    conversation: str | dict | None = None
+    reasoning: dict[str, Any] | None = None
+    text: dict[str, Any] | None = None
+    truncation: str | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -129,3 +133,66 @@ def build_error_response(message: str, code: str = "internal_error", status_code
             "code": status_code,
         },
     }
+
+
+def normalize_upstream_error(raw_body: str, status_code: int = 502) -> str:
+    """将上游各种错误格式统一提取为人类可读的错误信息。
+
+    上游 API 返回的错误格式五花八门：
+    - OpenAI:    {"error": {"message": "..."}}
+    - MiniMax:   {"base_resp": {"status_code": ..., "status_msg": "..."}}
+    - DeepSeek:  {"error": {"message": "..."}}
+    - 纯文本/HTML: 直接返回
+    - JSON 但格式未知: 尝试提取常见字段
+
+    返回: 标准化后的错误描述字符串
+    """
+    if not raw_body or not raw_body.strip():
+        return f"Upstream {status_code}: (empty response body)"
+
+    # 尝试解析 JSON
+    try:
+        import json
+        data = json.loads(raw_body)
+    except (json.JSONDecodeError, ValueError):
+        # 非 JSON 返回（纯文本或 HTML），截取前 500 字符
+        text = raw_body[:500].strip().replace("\n", " ").replace("\r", "")
+        if len(raw_body) > 500:
+            text += "..."
+        return f"Upstream {status_code}: {text}"
+
+    if not isinstance(data, dict):
+        return f"Upstream {status_code}: {str(data)[:300]}"
+
+    # OpenAI / DeepSeek 标准格式
+    error_obj = data.get("error")
+    if isinstance(error_obj, dict):
+        msg = error_obj.get("message", "")
+        err_type = error_obj.get("type", "")
+        err_code = error_obj.get("code", "")
+        if msg:
+            parts = [f"Upstream {status_code}: {msg}"]
+            if err_type:
+                parts.append(f"(type={err_type}")
+                if err_code:
+                    parts[-1] += f", code={err_code}"
+                parts[-1] += ")"
+            return " ".join(parts)
+
+    # MiniMax / 百度等自定义格式
+    base_resp = data.get("base_resp")
+    if isinstance(base_resp, dict):
+        msg = base_resp.get("status_msg", "") or base_resp.get("message", "")
+        code = base_resp.get("status_code", "")
+        if msg:
+            return f"Upstream {status_code}: {msg} (code={code})"
+
+    # 尝试其他常见字段
+    for key in ("msg", "message", "status_msg", "detail"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return f"Upstream {status_code}: {val}"
+
+    # 兜底：序列化整个 JSON（短版）
+    compact = json.dumps(data, ensure_ascii=False)[:300]
+    return f"Upstream {status_code}: {compact}"
