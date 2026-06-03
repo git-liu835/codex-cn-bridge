@@ -18,8 +18,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .config import get_config, reload_config
 from .adapters import get_registry
 from .adapters.base import BaseAdapter
-from .protocol import translate_request, translate_response, StreamTranslator, _sse_line
+from .protocol import translate_request, translate_response, StreamTranslator, _sse_line, get_response_cache, save_last_reasoning, set_affinity, get_affinity, _extract_conversation_id
 from .client import UpstreamClient
+from .circuit_breaker import get_circuit_breaker_registry, get_health_prober
 from .middleware import (
     ErrorHandlingMiddleware,
     RequestLoggingMiddleware,
@@ -34,6 +35,9 @@ logger = logging.getLogger("code-cn-bridge")
 
 
 def _setup_logging(verbose: bool = False) -> None:
+    cfg = get_config()
+    if not verbose and cfg.verbose_log:
+        verbose = True
     level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     formatter = logging.Formatter(fmt)
@@ -66,19 +70,24 @@ def _setup_logging(verbose: bool = False) -> None:
     root_logger.addHandler(file_handler)
 
 
-def _get_adapter_for_model(model: str) -> tuple[BaseAdapter, str, str, str]:
+def _get_adapter_for_model(model: str) -> tuple[BaseAdapter, str, str, list[str]]:
     """根据 code 模型名查找适配器
 
     Returns:
-        (adapter, provider_name, target_model, api_key)
+        (adapter, provider_name, target_model, api_keys)
     """
     cfg = get_config()
     provider_name, target_model = cfg.resolve_model(model)
     return _resolve_adapter(provider_name, target_model)
 
 
-def _resolve_adapter(provider_name: str, target_model: str) -> tuple[BaseAdapter, str, str, str]:
-    """根据 provider 名和目标模型查找适配器实例"""
+def _resolve_adapter(provider_name: str, target_model: str) -> tuple[BaseAdapter, str, str, list[str]]:
+    """根据 provider 名和目标模型查找适配器实例
+
+    Returns:
+        (adapter, provider_name, target_model, api_keys)
+        api_keys 是列表，支持多 key 轮转
+    """
     cfg = get_config()
     provider = cfg.get_provider(provider_name)
 
@@ -97,8 +106,8 @@ def _resolve_adapter(provider_name: str, target_model: str) -> tuple[BaseAdapter
             f"可用适配器: {reg.list()}"
         )
 
-    api_key = provider.get("api_key", "")
-    if not api_key:
+    api_keys = cfg.get_api_keys(provider_name)
+    if not api_keys or not api_keys[0]:
         raise ValueError(
             f"Provider '{provider_name}' 的 API Key 未设置。"
             f"请设置环境变量 {provider.get('api_key_env', '???')}"
@@ -108,7 +117,7 @@ def _resolve_adapter(provider_name: str, target_model: str) -> tuple[BaseAdapter
     if provider.get("base_url"):
         adapter.base_url = provider["base_url"]
 
-    return adapter, provider_name, target_model, api_key
+    return adapter, provider_name, target_model, api_keys
 
 
 def _has_images(input_items: list[dict]) -> bool:
@@ -198,7 +207,7 @@ async def _handle_responses_image_gen(
         )
 
     try:
-        adapter, _, _, api_key = _resolve_adapter(provider_name, img_target)
+        adapter, _, _, api_keys = _resolve_adapter(provider_name, img_target)
     except ValueError as exc:
         return JSONResponse(build_error_response(str(exc)), status_code=400)
 
@@ -211,13 +220,13 @@ async def _handle_responses_image_gen(
     }
     img_body = adapter.preprocess_image_gen_request(img_body)
     img_url = adapter.build_image_gen_url()
-    headers = adapter.get_headers(api_key)
+    headers = adapter.get_headers(api_keys[0])
 
     logger.info("image_gen 拦截 → 调用生图 API: %s, prompt=%.80s..., size=%s",
         img_url, prompt[:80], size)
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120), trust_env=False) as client:
             resp = await client.post(img_url, json=img_body, headers=headers)
             result = resp.json()
     except httpx.TimeoutException:
@@ -253,7 +262,7 @@ async def _handle_responses_image_gen(
             image_data = b64
         elif image_url_from_api:
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(60)) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(60), trust_env=False) as client:
                     img_resp = await client.get(image_url_from_api)
                     if img_resp.status_code == 200:
                         image_data = _base64.b64encode(img_resp.content).decode("ascii")
@@ -394,12 +403,18 @@ def create_app(verbose: bool = False) -> FastAPI:
             cfg.server_host,
             cfg.server_port,
         )
-        yield
-        logger.info("code CN Bridge 已关闭")
+        # 启动主动健康探测
+        prober = get_health_prober()
+        await prober.start()
+        try:
+            yield
+        finally:
+            await prober.stop()
+            logger.info("code CN Bridge 已关闭")
 
     app = FastAPI(
         title="code CN Bridge",
-        version="0.3.21",
+        version="1.0.0",
         description="OpenAI Responses API → Chat Completions API 协议转换代理",
         lifespan=lifespan,
     )
@@ -439,17 +454,25 @@ def create_app(verbose: bool = False) -> FastAPI:
             items = entry if isinstance(entry, list) else [entry]
             if not any(item.get("enabled", True) for item in items):
                 continue
-            provider = ""
             for item in items:
                 if item.get("enabled", True):
-                    provider = item.get("provider", "code-cn-bridge")
+                    target = item.get("target", alias)
+                    provider_name = item.get("provider", "")
+                    models.append({
+                        "id": target,           # 显示真实模型名（如 deepseek-v4-pro）
+                        "object": "model",
+                        "created": 1700000000,
+                        "owned_by": "cn-bridge", # provider 统一显示为 cn-bridge
+                    })
+                    # 同时保留 alias 作为可选模型 ID（兼容旧请求）
+                    if target != alias and alias != provider_name:
+                        models.append({
+                            "id": alias,
+                            "object": "model",
+                            "created": 1700000000,
+                            "owned_by": "cn-bridge",
+                        })
                     break
-            models.append({
-                "id": alias,
-                "object": "model",
-                "created": 1700000000,
-                "owned_by": provider,
-            })
         return {"object": "list", "data": models}
 
     @app.post("/admin/reload-config")
@@ -476,8 +499,25 @@ def create_app(verbose: bool = False) -> FastAPI:
         stream = body.get("stream", False)
         verbose = logger.isEnabledFor(logging.DEBUG)
 
+        # 会话粘性: 同一会话的后续请求路由到同一 provider
+        conv_id = _extract_conversation_id(body)
+        affinity_provider = get_affinity(conv_id) if conv_id else None
+
         try:
-            adapter, provider_name, target_model, api_key = _route_vision(model, body)
+            if affinity_provider:
+                try:
+                    adapter, provider_name, target_model, api_keys = _resolve_adapter(affinity_provider, body.get("model", model))
+                    logger.debug("会话粘性路由: %s → provider=%s", conv_id, provider_name)
+                except ValueError:
+                    # 亲和 provider 不可用，回退到正常路由
+                    affinity_provider = None
+                    adapter, provider_name, target_model, api_keys = _route_vision(model, body)
+            else:
+                adapter, provider_name, target_model, api_keys = _route_vision(model, body)
+
+            # 记录会话粘性映射
+            if conv_id and not affinity_provider:
+                set_affinity(conv_id, provider_name)
         except ValueError as exc:
             status_code = 400
             error_msg = str(exc)
@@ -492,15 +532,24 @@ def create_app(verbose: bool = False) -> FastAPI:
 
         # 从 provider 配置读取超时设置
         provider_timeout = get_config().get_provider(provider_name).get("timeout", 120) if provider_name else 120
-        client = UpstreamClient(adapter, api_key, timeout=provider_timeout, stream_timeout=max(provider_timeout, 600))
+        client = UpstreamClient(adapter, api_keys, timeout=provider_timeout, stream_timeout=max(provider_timeout, 600))
+
+        # 熔断器检查
+        circuit_breaker = get_circuit_breaker_registry().get(provider_name)
+        if not circuit_breaker.before_request():
+            status_code = 503
+            error_msg = f"Provider '{provider_name}' 已熔断，请稍后重试 (健康评分: {circuit_breaker.health_score})"
+            _record_request(start_time, model, "responses", status_code, stream, error_msg, provider=provider_name, target_model=target_model)
+            return JSONResponse(
+                content=build_error_response(error_msg, "circuit_open", 503),
+                status_code=503,
+            )
 
         try:
             # 1. 协议转换: Responses → Chat
             cfg = get_config()
-            chat_req = translate_request(body, adapter, target_model, alias=model)
-            has_image_gen = chat_req.pop("_has_image_gen", False)
 
-            # 从 model_mapping 读取 per-model thinking 配置
+            # 从 model_mapping 读取 per-model thinking 配置（必须在 translate_request 之前设置）
             model_entry = cfg.model_mapping.get(model)
             if isinstance(model_entry, list):
                 model_item = next((e for e in model_entry if e.get("enabled")), model_entry[0] if model_entry else None)
@@ -508,9 +557,22 @@ def create_app(verbose: bool = False) -> FastAPI:
                 model_item = model_entry
             if model_item is not None:
                 if not model_item.get("enable_thinking", True):
-                    chat_req["_disable_thinking"] = True
+                    body["_disable_thinking"] = True
                 if "thinking_budget" in model_item:
-                    chat_req["_thinking_budget"] = model_item["thinking_budget"]
+                    budget = model_item["thinking_budget"]
+                    # 动态缩预算：上下文越长，思考预算越低，给正文留足空间
+                    other_count = sum(
+                        1 for item in body.get("input", [])
+                        if item.get("role") != "system"
+                    )
+                    if other_count > 25:
+                        budget = min(budget, 4096)
+                    elif other_count > 15:
+                        budget = min(budget, 8192)
+                    body["_thinking_budget"] = budget
+
+            chat_req = translate_request(body, adapter, target_model, alias=model)
+            has_image_gen = chat_req.pop("_has_image_gen", False)
 
             # image_gen 内置工具：不转发给 LLM，直接在 bridge 内处理
             if has_image_gen:
@@ -526,9 +588,9 @@ def create_app(verbose: bool = False) -> FastAPI:
                 _safe_log("Chat 请求详情", chat_req)
 
             if stream:
-                # 2. 流式处理
+                # 2. 流式处理（返回真实模型名，Codex 显示 target_model）
                 return StreamingResponse(
-                    _handle_stream(client, adapter, chat_req, model, verbose, start_time, provider_name, target_model),
+                    _handle_stream(client, adapter, chat_req, target_model, verbose, start_time, provider_name, target_model),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -542,7 +604,12 @@ def create_app(verbose: bool = False) -> FastAPI:
                 chat_resp = await client.chat_completion(chat_req)
                 if verbose:
                     _safe_log("Chat 响应", chat_resp)
-                responses_resp = translate_response(chat_resp, adapter, model)
+                responses_resp = translate_response(chat_resp, adapter, target_model)
+
+                # 缓存响应供 previous_response_id 查询
+                resp_id = responses_resp.get("id", "")
+                if resp_id:
+                    get_response_cache().put(resp_id, responses_resp)
 
                 # 统计 token
                 tokens = chat_resp.get("usage", {}).get("total_tokens", 0)
@@ -551,12 +618,14 @@ def create_app(verbose: bool = False) -> FastAPI:
                     _safe_log("Responses 响应", responses_resp)
 
                 _record_request(start_time, model, "responses", 200, False, "", tokens, provider=provider_name, target_model=target_model)
+                circuit_breaker.on_success()
                 return JSONResponse(content=responses_resp)
 
         except Exception as exc:
             status_code = 500
             error_msg = str(exc)
             logger.exception("请求处理异常")
+            circuit_breaker.on_failure()
             _record_request(start_time, model, "responses", status_code, stream, error_msg, provider=provider_name, target_model=target_model)
             return JSONResponse(
                 content=build_error_response(error_msg),
@@ -582,7 +651,7 @@ def create_app(verbose: bool = False) -> FastAPI:
         stream = body.get("stream", False)
 
         try:
-            adapter, provider_name, target_model, api_key = _get_adapter_for_model(model)
+            adapter, provider_name, target_model, api_keys = _get_adapter_for_model(model)
         except ValueError as exc:
             _record_request(start_time, model, "chat", 400, stream, str(exc), provider="", target_model="")
             return JSONResponse(
@@ -594,7 +663,7 @@ def create_app(verbose: bool = False) -> FastAPI:
         body = adapter.preprocess_chat_request(body)
 
         provider_timeout = get_config().get_provider(provider_name).get("timeout", 120) if provider_name else 120
-        client = UpstreamClient(adapter, api_key, timeout=provider_timeout, stream_timeout=max(provider_timeout, 600))
+        client = UpstreamClient(adapter, api_keys, timeout=provider_timeout, stream_timeout=max(provider_timeout, 600))
         try:
             if stream:
                 async def _sse_gen():
@@ -685,7 +754,7 @@ def create_app(verbose: bool = False) -> FastAPI:
             return JSONResponse({"error": {"message": f"未找到生图 provider: {gen_alias}"}}, 400)
 
         try:
-            adapter, _, _, api_key = _resolve_adapter(provider_name, gen_target)
+            adapter, _, _, api_keys = _resolve_adapter(provider_name, gen_target)
         except ValueError as exc:
             return JSONResponse({"error": {"message": str(exc)}}, 400)
 
@@ -707,7 +776,7 @@ def create_app(verbose: bool = False) -> FastAPI:
 
         img_body = adapter.preprocess_image_gen_request(img_body)
         img_url = adapter.build_image_gen_url()
-        headers = adapter.get_headers(api_key)
+        headers = adapter.get_headers(api_keys[0])
 
         logger.info("生图请求 → %s/%s: prompt=%.80s..., size=%s",
             provider_name, gen_target,
@@ -716,7 +785,7 @@ def create_app(verbose: bool = False) -> FastAPI:
 
         start_time = time.time()
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120), trust_env=False) as client:
                 resp = await client.post(img_url, json=img_body, headers=headers)
                 elapsed = (time.time() - start_time) * 1000
                 result = resp.json()
@@ -742,6 +811,31 @@ def create_app(verbose: bool = False) -> FastAPI:
 
 # ── 流式处理 ────────────────────────────────────────────────────────
 
+def _is_budget_constraint_error(error_msg: str) -> bool:
+    """检测是否为 thinking budget_tokens 约束错误（需要 rectifier 修正）"""
+    lower = error_msg.lower()
+    return (
+        ("budget_tokens" in lower or "budget tokens" in lower)
+        and "thinking" in lower
+        and ("1024" in lower and ("greater than" in lower or ">=" in lower or "input should be" in lower))
+    )
+
+
+def _rectify_budget_params(chat_req: dict) -> None:
+    """修正 thinking budget 参数：budget_tokens=32000, max_tokens=64000"""
+    MAX_BUDGET = 32000
+    MAX_TOKENS = 64000
+
+    if "thinking" not in chat_req or not isinstance(chat_req.get("thinking"), dict):
+        chat_req["thinking"] = {}
+    chat_req["thinking"]["type"] = "enabled"
+    chat_req["thinking"]["budget_tokens"] = MAX_BUDGET
+
+    cur_max = chat_req.get("max_tokens", 0) or 0
+    if cur_max < MAX_BUDGET + 1:
+        chat_req["max_tokens"] = MAX_TOKENS
+
+
 async def _handle_stream(
     client: UpstreamClient,
     adapter: BaseAdapter,
@@ -754,8 +848,11 @@ async def _handle_stream(
 ):
     """处理流式请求: 上游 Chat SSE → 适配器变换 → 协议转换 → Responses SSE
 
-    支持自动重试一次：上游连接断开时重建连接和 StreamTranslator，
-    避免 translator 状态污染导致 Codex 收到混乱的 SSE 事件流。
+    稳定性保障:
+    - 30s chunk 超时，容忍 DeepSeek 等模型的长时间推理
+    - 闲置 > 25s 时发送保活信号
+    - 断连自动重试一次（重建 translator 避免状态污染）
+    - 始终发送 response.completed，Codex 不会悬挂
     """
     import httpx
 
@@ -763,48 +860,188 @@ async def _handle_stream(
         httpx.RemoteProtocolError, httpx.ReadTimeout,
         httpx.ConnectTimeout, httpx.ConnectError,
         ConnectionResetError, ConnectionAbortedError,
+        httpx.ReadError,
     )
 
-    stream_error = ""
-    translator = StreamTranslator(model=model)
-    chat_stream = client.chat_completion_stream(chat_req)
+    CHUNK_TIMEOUT = 30.0
+    MAX_RETRIES = 1
+    IDLE_BEFORE_PING = 25.0
 
-    try:
-        while True:
-            try:
-                chunk = await asyncio.wait_for(anext(chat_stream), timeout=10.0)
-            except asyncio.TimeoutError:
-                yield ": heartbeat\n\n"
-                continue
-            except StopAsyncIteration:
+    stream_error = ""
+    retry_count = 0
+    translator = StreamTranslator(model=model)
+    empty_content_retried = False  # 防止无限重试空洞响应
+
+    # 响应预热: 立即发送 response.created，不等上游 API 响应
+    for event_line in translator.warmup():
+        yield event_line
+
+    chunk_count = 0
+    first_chunk_time = 0.0
+
+    while retry_count <= MAX_RETRIES:
+        # ── 空洞响应重试：上一轮没产出实质内容，关闭思考重试 ──
+        if empty_content_retried and retry_count == 0:
+            logger.info("空洞响应重试: 关闭 thinking 模式重新请求")
+            chat_req["_disable_thinking"] = True
+            chat_req.pop("_thinking_budget", None)
+            translator = StreamTranslator(model=model)
+            if client._stream_client:
+                try:
+                    await client._stream_client.aclose()
+                except Exception:
+                    pass
+                client._stream_client = None
+            for event_line in translator.warmup():
+                yield event_line
+            chunk_count = 0
+            first_chunk_time = 0.0
+
+        chat_stream = client.chat_completion_stream(chat_req)
+        stream_error = ""
+        last_chunk_time = asyncio.get_event_loop().time()
+
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(
+                        anext(chat_stream), timeout=CHUNK_TIMEOUT
+                    )
+                    last_chunk_time = asyncio.get_event_loop().time()
+                    chunk_count += 1
+                    if first_chunk_time == 0.0:
+                        first_chunk_time = last_chunk_time
+                        logger.debug("流式首chunk到达 (%.1fs后), req=%s",
+                            first_chunk_time - start_time, translator.response_id)
+                except asyncio.TimeoutError:
+                    idle_duration = asyncio.get_event_loop().time() - last_chunk_time
+                    if idle_duration > IDLE_BEFORE_PING:
+                        yield ": keepalive\n\n"
+                    yield ": heartbeat\n\n"
+                    continue
+                except StopAsyncIteration:
+                    logger.debug("流式上游结束 req=%s chunks=%d 耗时=%.1fs",
+                        translator.response_id, chunk_count,
+                        asyncio.get_event_loop().time() - start_time)
+                    break
+
+                chunk = adapter.stream_event_transform(chunk)
+
+                # 始终记录空 choices（可能是问题征兆）
+                choices = chunk.get("choices", [])
+                if not choices:
+                    logger.debug("空choices chunk req=%s keys=%s", translator.response_id, list(chunk.keys()))
+
+                if verbose:
+                    _safe_log("Chat chunk", chunk)
+
+                events_yielded = 0
+                for event_line in translator.translate_chunk(chunk):
+                    events_yielded += 1
+                    yield event_line
+
+            # 检测空洞响应：模型没产出实质内容就停了
+            # 涵盖三种情况：
+            #   1. 只推理不输出 (reasoning=有, content=空, tools=空)
+            #   2. 完全空响应 (reasoning=空, content=空, tools=空)
+            #   3. 敷衍短输出 (content < 50 字符, tools=空)
+            content_text = "".join(translator._accumulated_text).strip()
+            has_tool_calls = bool(translator._tc_buf)
+            has_useful_content = len(content_text) >= 50
+
+            is_empty_response = not has_tool_calls and not has_useful_content
+
+            if is_empty_response and not empty_content_retried:
+                logger.warning(
+                    "检测到空洞响应 (reasoning=%d chars, content='%s', tools=%d), 关闭思考重试",
+                    len("".join(translator._reasoning_buf)),
+                    content_text[:80],
+                    len(translator._tc_buf),
+                )
+                empty_content_retried = True
+                retry_count = 0
+                # 不 break，外层 while 循环下一轮会检测标志并重试
+            else:
+                break  # 成功，退出重试循环
+
+        except RETRYABLE as exc:
+            stream_error = str(exc)
+            retry_count += 1
+            logger.warning(
+                "流式连接断开 (第%d次, %.0fs后): %s",
+                retry_count,
+                asyncio.get_event_loop().time() - start_time,
+                exc,
+            )
+
+            if client._stream_client:
+                try:
+                    await client._stream_client.aclose()
+                except Exception:
+                    pass
+                client._stream_client = None
+
+            if retry_count <= MAX_RETRIES:
+                logger.info("尝试重连 (第%d次)...", retry_count)
+                # 多 key 轮转：重试时切换到下一个 key
+                client.rotate_key()
+                translator = StreamTranslator(model=model)
+                await asyncio.sleep(1.5)
+
+        except httpx.HTTPStatusError as exc:
+            # Thinking budget rectifier: 自动修正 budget_tokens 约束错误并重试
+            error_msg = str(exc)
+            if (adapter.supports_thinking_budget
+                    and retry_count <= MAX_RETRIES
+                    and _is_budget_constraint_error(error_msg)):
+                logger.warning(
+                    "检测到 thinking budget 约束错误，自动修正并重试: %s",
+                    error_msg[:150],
+                )
+                _rectify_budget_params(chat_req)
+                stream_error = error_msg
+                retry_count += 1
+                if client._stream_client:
+                    try:
+                        await client._stream_client.aclose()
+                    except Exception:
+                        pass
+                    client._stream_client = None
+                client.rotate_key()
+                translator = StreamTranslator(model=model)
+                await asyncio.sleep(1.0)
+            else:
+                stream_error = error_msg
+                logger.error("上游返回错误: %s", error_msg[:200])
                 break
 
-            chunk = adapter.stream_event_transform(chunk)
+        except Exception as exc:
+            stream_error = str(exc)
+            logger.exception("流式处理异常")
+            break
 
-            if verbose:
-                _safe_log("Chat chunk", chunk)
-
-            for event_line in translator.translate_chunk(chunk):
+    # 流正常结束
+    if not stream_error:
+        try:
+            for event_line in translator._finish():
                 yield event_line
+            get_response_cache().put(translator.response_id, {
+                "id": translator.response_id,
+                "model": model,
+                "output": translator._output_items,
+            })
+            # 缓存 reasoning_content 供下一轮恢复（DeepSeek tool_call 场景）
+            reasoning_text = "".join(translator._reasoning_buf)
+            if reasoning_text:
+                save_last_reasoning(reasoning_text)
+        except Exception as exc:
+            logger.exception("流结束事件发送异常")
+            stream_error = str(exc)
 
-        # 流正常结束，发送 response.completed
-        for event_line in translator._finish():
-            yield event_line
-
-    except RETRYABLE as exc:
-        stream_error = str(exc)
-        logger.warning("流式连接断开: %s", exc)
-        if client._stream_client:
-            await client._stream_client.aclose()
-            client._stream_client = None
-
-    except Exception as exc:
-        stream_error = str(exc)
-        logger.exception("流式处理异常")
-
-    # 流异常结束时发送 error 事件，让 Codex 知道请求已终止
+    # 流异常结束时发送 error 事件
     if stream_error:
         try:
+            _close_incomplete_items(translator)
             yield _sse_line(build_error_response(stream_error))
             yield _sse_line({
                 "type": "response.completed",
@@ -821,10 +1058,42 @@ async def _handle_stream(
 
     if stream_error:
         _record_request(start_time, model, "responses", 500, True, stream_error, provider=provider, target_model=target_model)
+        get_circuit_breaker_registry().get(provider).on_failure()
     else:
         _record_request(start_time, model, "responses", 200, True, "", provider=provider, target_model=target_model)
+        get_circuit_breaker_registry().get(provider).on_success()
 
     await client.close()
+
+
+def _close_incomplete_items(translator) -> None:
+    """关闭 StreamTranslator 中所有未完成的输出项，标记为 completed"""
+    if translator._reasoning_started:
+        reasoning_text = "".join(translator._reasoning_buf)
+        idx = translator._reasoning_item_index
+        if 0 <= idx < len(translator._output_items):
+            item = translator._output_items[idx]
+            item["status"] = "completed"
+            if item.get("content"):
+                item["content"][0]["text"] = reasoning_text
+        translator._reasoning_started = False
+
+    if translator._text_started:
+        idx = translator._text_item_index
+        if 0 <= idx < len(translator._output_items):
+            item = translator._output_items[idx]
+            item["status"] = "completed"
+            if item.get("content"):
+                item["content"][0]["text"] = translator._accumulated_text
+        translator._text_started = False
+
+    for tc_index in translator._tc_buf:
+        buf = translator._tc_buf[tc_index]
+        idx = buf["item_index"]
+        if 0 <= idx < len(translator._output_items):
+            translator._output_items[idx]["status"] = "completed"
+            translator._output_items[idx]["name"] = buf["name"]
+            translator._output_items[idx]["arguments"] = buf["arguments"]
 
 
 def _record_request(

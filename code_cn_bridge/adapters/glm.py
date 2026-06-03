@@ -11,6 +11,8 @@ class GlmAdapter(BaseAdapter):
     name = "zhipu"
     base_url = "https://open.bigmodel.cn/api/paas/v4"
     api_key_env = "ZHIPU_API_KEY"
+    unsupported_features: set[str] = set()  # GLM 对 Chat API 支持完整
+    supports_thinking_budget: bool = False  # GLM 仅支持 thinking 开关，不支持 budget_tokens
 
     def preprocess_chat_request(self, chat_req: dict) -> dict:
         chat_req.pop("logprobs", None)
@@ -25,8 +27,16 @@ class GlmAdapter(BaseAdapter):
             if "thinking" not in chat_req:
                 chat_req["thinking"] = {"type": "disabled"}
         elif "thinking" not in chat_req:
-            budget = chat_req.pop("_thinking_budget", 4096)
-            chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            if self.supports_thinking_budget:
+                budget = chat_req.pop("_thinking_budget", 4096)
+                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            else:
+                chat_req.pop("_thinking_budget", None)
+                chat_req["thinking"] = {"type": "enabled"}
+                # 确保 max_tokens 足够容纳 thinking + 实际输出
+                cur_max = chat_req.get("max_tokens", 0)
+                if not cur_max or cur_max < 16384:
+                    chat_req["max_tokens"] = 16384
 
         # do_sample: 智谱默认采样模式
         if "do_sample" not in chat_req:

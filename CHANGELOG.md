@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.0 (2026-06-04) — 稳定性与长对话增强
+
+### 新功能
+
+- **熔断保护**: 新增 provider 级熔断器（3 次连续失败→断开 30 秒→半开探测），上游 API 异常时快速返回 503 而非长时间挂起。
+- **多 Key 轮换**: 每个 provider 支持配置多个 API Key（`api_keys` 列表或 `api_keys_env` 逗号分隔），流式重试时自动切换到下一个 Key，避免单 Key 限流导致对话中断。
+- **推理内容缓存恢复**: DeepSeek 在 tool_calls 消息中偶发丢失 `reasoning_content`，自动从缓存注入恢复，确保后续对话能正确引用前轮推理。
+- **会话粘性**: 同一 `conversation.id` 在 10 分钟内始终路由到同一 provider，避免多 provider 场景下上下文断裂。
+- **响应预热**: 流式请求发起前立即下发 `response.created` 事件，减少用户感知的首字节延迟。
+- **工具调用延迟加载**: SSE 工具调用事件推迟到首个参数到达才发送，避免 Codex 收到空工具调用而卡住。
+- **响应缓存磁盘持久化**: 对话摘要缓存落地到 `~/.code-cn-bridge/cache/responses/`（原子写入+重命名），Bridge 重启后缓存不丢失。
+- **项目上下文自动注入**: 新增 `project_context` 配置项，自动检测项目根目录的 CODEX.md/CLAUDE.md/.cursorrules 等规则文件并注入到系统指令，模型无需每次重新了解项目结构。
+- **Codex 历史感知**: 支持读取 Codex 桌面端的 `state_5.sqlite` 数据库，将最近对话摘要作为上下文注入，实现跨会话记忆。
+- **空洞响应自动重试**: 检测模型返回的无实质内容响应（无工具调用且文本不足 50 字符），自动关闭思考模式重试一次。
+- **Thinking Budget 自动修正**: 检测 DeepSeek `budget_tokens` 参数错误，自动修正参数后重试。
+
+### 改进
+
+- 所有适配器新增 `supports_thinking_budget` 标志位，DeepSeek 支持，其他模型自动省略 budget_tokens 参数。
+- 非 DeepSeek 适配器（Kimi/GLM/Qwen/Doubao）新增 max_tokens 下限保护（16384），防止 thinking 耗尽所有输出 token。
+- 流式心跳间隔优化为 25 秒，读超时提升至 600 秒，适应长时间推理场景。
+- 流式重试时自动轮换 API Key + 重建翻译器，避免状态污染。
+- `httpx` 客户端全局设置 `trust_env=False`，避免系统代理（Clash/V2Ray）导致 TLS 握手间歇性失败。
+- SSE 事件完整性修复：工具调用和文本输出项均正确发送 `done` 事件。
+- 日志新增详细模式（`DetailedLoggingMiddleware`），桌面端可查看请求/响应体（已脱敏）。
+
 ## v0.3.17 (2026-05-26)
 
 ### Features

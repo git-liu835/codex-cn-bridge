@@ -12,11 +12,25 @@ class BaseAdapter(ABC):
       - name: 适配器名称 (如 "qwen", "deepseek")
       - base_url: 模型 API 基地址
       - api_key_env: API Key 对应的环境变量名
+      - unsupported_features: 该提供商不支持的 Responses API 特性集合
     """
 
     name: str = ""
     base_url: str = ""
     api_key_env: str = ""
+
+    # 该提供商不支持的特性，子类覆盖。可选值:
+    #   "response_format" — 结构化 JSON 输出
+    #   "tool_calls_parallel" — 并行多工具调用
+    #   "logprobs" — token 概率
+    #   "thinking" — 思维链推理
+    unsupported_features: set[str] = set()
+
+    # 思维链推理能力声明
+    # supports_thinking_budget: 是否支持 budget_tokens 参数
+    #   True (默认): thinking: {type: "enabled", budget_tokens: N}
+    #   False: thinking: {type: "enabled"} (仅开关，不含 budget_tokens)
+    supports_thinking_budget: bool = True
 
     # ── 三个钩子方法 ─────────────────────────────────────────────
 
@@ -25,6 +39,27 @@ class BaseAdapter(ABC):
 
         可用于移除不支持的字段、调整参数格式等。
         """
+        return chat_req
+
+    def strip_unsupported(self, chat_req: dict) -> dict:
+        """根据 unsupported_features 移除请求中不被支持的字段
+
+        会在 translate_request() 生成 Chat 请求后、adapter 预处理前调用。
+        """
+        import logging
+        _log = logging.getLogger("code-cn-bridge")
+        unsupported = self.unsupported_features
+
+        if "response_format" in unsupported and "response_format" in chat_req:
+            _log.warning("模型 %s 不支持 structured output (response_format)，已移除", self.name)
+            chat_req.pop("response_format", None)
+
+        if "tool_calls_parallel" in unsupported and "tool_choice" in chat_req:
+            tc = chat_req["tool_choice"]
+            if tc == "auto":
+                _log.warning("模型 %s 不支持并行工具调用，已禁用 tool_choice", self.name)
+                chat_req.pop("tool_choice", None)
+
         return chat_req
 
     def postprocess_chat_response(self, chat_resp: dict) -> dict:

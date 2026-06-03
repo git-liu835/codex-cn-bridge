@@ -11,6 +11,7 @@ class DeepSeekAdapter(BaseAdapter):
     name = "deepseek"
     base_url = "https://api.deepseek.com"
     api_key_env = "DEEPSEEK_API_KEY"
+    unsupported_features: set[str] = set()  # DeepSeek 对 Chat API 支持完整
 
     def preprocess_chat_request(self, chat_req: dict) -> dict:
         # DeepSeek 不支持 logprobs
@@ -33,8 +34,20 @@ class DeepSeekAdapter(BaseAdapter):
             if "thinking" not in chat_req:
                 chat_req["thinking"] = {"type": "disabled"}
         elif "thinking" not in chat_req:
-            budget = chat_req.pop("_thinking_budget", 4096)
-            chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            if self.supports_thinking_budget:
+                budget = chat_req.pop("_thinking_budget", 4096)
+                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                # 确保 max_tokens 足够容纳 thinking + 实际输出，否则模型可能只思考不输出
+                # thinking_budget=8192 时 max_tokens 至少 24576（留 16384 给正文）
+                cur_max = chat_req.get("max_tokens", 0)
+                min_max = budget + 16384
+                if cur_max and cur_max < min_max:
+                    chat_req["max_tokens"] = min_max
+                elif not cur_max:
+                    chat_req["max_tokens"] = min_max
+            else:
+                chat_req.pop("_thinking_budget", None)
+                chat_req["thinking"] = {"type": "enabled"}
 
         # DeepSeek 对 tool 格式有要求，确保 function 字段存在
         tools = chat_req.get("tools")
