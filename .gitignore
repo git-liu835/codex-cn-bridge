@@ -59,3 +59,6 @@ cc-switch/
 CODEX.md
 CHANGELOG.md
 CLAUDE.md
+
+# Claude Code session data
+.logicweaver/
