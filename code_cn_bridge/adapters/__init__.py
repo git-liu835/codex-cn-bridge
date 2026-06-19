@@ -46,9 +46,11 @@ def _register_builtins(reg: AdapterRegistry) -> None:
     from .kimi import KimiAdapter
     from .doubao import DoubaoAdapter
     from .glm import GlmAdapter
+    from .agnes import AgnesAdapter
 
     reg.register(QwenAdapter())
     reg.register(DeepSeekAdapter())
     reg.register(KimiAdapter())
     reg.register(DoubaoAdapter())
     reg.register(GlmAdapter())
+    reg.register(AgnesAdapter())

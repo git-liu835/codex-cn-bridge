@@ -14,7 +14,7 @@ def run(cmd: list[str]) -> None:
 def main():
     DIST.mkdir(exist_ok=True)
 
-    pip = [sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check"]
+    pip = [sys.executable, "-m", "pip", "install", "-q", "--user", "--disable-pip-version-check"]
 
     run(pip + ["pyinstaller"])
     run(pip + ["-e", str(ROOT)])

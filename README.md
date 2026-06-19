@@ -114,6 +114,7 @@ model_mapping:
 | Kimi      | kimi     | ✅      | ✅      |
 | 豆包/火山  | doubao   | ✅      | ✅      |
 | 智谱 GLM  | zhipu    | ✅      | ✅      |
+| Agnes AI  | agnes    | ✅      | ✅      |
 
 ## CLI 命令
 

@@ -55,6 +55,15 @@ providers:
     max_retries: 0
     timeout: 120
     tool_calls_enabled: true
+  agnes:
+    adapter: agnes
+    base_url: https://apihub.agnes-ai.com/v1
+    api_key_env: AGNES_API_KEY
+    enabled: false
+    extra_headers: {}
+    max_retries: 0
+    timeout: 120
+    tool_calls_enabled: true
 
 model_mapping:
   gpt-5-code:
@@ -75,6 +84,56 @@ model_mapping:
     is_video_gen: false
     provider: deepseek
     target: deepseek-v4-pro
+    video_gen_alias: null
+    vision_alias: null
+  agnes-2.0-flash:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: agnes
+    target: agnes-2.0-flash
+    video_gen_alias: null
+    vision_alias: null
+  agnes-1.5-flash:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: agnes
+    target: agnes-1.5-flash
+    video_gen_alias: null
+    vision_alias: null
+  agnes-image-2.1-flash:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: true
+    is_multimodal: false
+    is_video_gen: false
+    provider: agnes
+    target: agnes-image-2.1-flash
+    video_gen_alias: null
+    vision_alias: null
+  agnes-image-2.0-flash:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: true
+    is_multimodal: false
+    is_video_gen: false
+    provider: agnes
+    target: agnes-image-2.0-flash
+    video_gen_alias: null
+    vision_alias: null
+  agnes-video-v2.0:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: true
+    provider: agnes
+    target: agnes-video-v2.0
     video_gen_alias: null
     vision_alias: null
 
