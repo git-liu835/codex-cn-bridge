@@ -27,6 +27,8 @@ const Settings: React.FC = () => {
   const [codexLoading, setCodexLoading] = useState(false);
   const [codexError, setCodexError] = useState('');
   const [copiedField, setCopiedField] = useState<'config' | 'auth' | ''>('');
+  // /v1/models 预览（Codex 桌面版会看到这些模型）
+  const [v1Models, setV1Models] = useState<{ id: string; owned_by: string; target?: string; context_window?: number; capabilities?: Record<string, boolean> }[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -117,12 +119,17 @@ const Settings: React.FC = () => {
     setCodexLoading(true);
     setCodexError('');
     try {
-      const [cfgData, authData] = await Promise.all([api.getCodexConfig(), api.getCodexAuth()]);
+      const [cfgData, authData, modelsData] = await Promise.all([
+        api.getCodexConfig(),
+        api.getCodexAuth(),
+        api.getV1Models().catch(() => ({ object: 'list', data: [] })),
+      ]);
       if (cfgData.error) { setCodexError(cfgData.error); return; }
       if (authData.error) { setCodexError(authData.error); return; }
       setCodexConfig(cfgData.config);
       setCodexAuth(authData.auth_json);
       setCodexMeta({ default_model: cfgData.default_model, enabled_count: cfgData.enabled_count });
+      setV1Models(modelsData.data || []);
     } catch (err: any) {
       setCodexError(err.message || String(err));
     } finally {
@@ -274,6 +281,50 @@ const Settings: React.FC = () => {
             {codexMeta.enabled_count === 0
               ? tl('settings.codexNoModel')
               : `${tl('settings.codexEnabledPrefix')} ${codexMeta.enabled_count} ${tl('settings.codexEnabledSuffix')} ${codexMeta.default_model || '-'}`}
+          </div>
+        )}
+
+        {/* 模型列表预览：Codex 桌面版会通过 /v1/models 看到这些模型 */}
+        {v1Models.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+              Codex 桌面版将显示的模型列表（/v1/models）：
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border, rgba(255,255,255,0.1))', textAlign: 'left' }}>
+                  <th style={{ padding: '6px 8px' }}>模型 ID</th>
+                  <th style={{ padding: '6px 8px' }}>真实模型</th>
+                  <th style={{ padding: '6px 8px' }}>提供商</th>
+                  <th style={{ padding: '6px 8px' }}>上下文</th>
+                  <th style={{ padding: '6px 8px' }}>能力</th>
+                </tr>
+              </thead>
+              <tbody>
+                {v1Models.map((m) => {
+                  const caps = m.capabilities || {};
+                  const capBadges: string[] = [];
+                  if (caps.supports_tool_calls) capBadges.push('tools');
+                  if (caps.supports_vision) capBadges.push('vision');
+                  if (caps.supports_reasoning) capBadges.push('reasoning');
+                  if (caps.supports_image_gen) capBadges.push('image');
+                  if (caps.supports_video_gen) capBadges.push('video');
+                  return (
+                    <tr key={m.id} style={{ borderBottom: '1px solid var(--border, rgba(255,255,255,0.05))' }}>
+                      <td style={{ padding: '6px 8px', fontFamily: 'monospace' }}>{m.id}</td>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-muted)' }}>{m.target || m.id}</td>
+                      <td style={{ padding: '6px 8px' }}>{m.owned_by}</td>
+                      <td style={{ padding: '6px 8px' }}>{m.context_window ? (m.context_window / 1000) + 'K' : '-'}</td>
+                      <td style={{ padding: '6px 8px' }}>
+                        {capBadges.map(b => (
+                          <span key={b} style={{ display: 'inline-block', padding: '1px 6px', marginRight: 4, borderRadius: 3, background: 'var(--bg-elevated, rgba(255,255,255,0.08))', fontSize: 11 }}>{b}</span>
+                        ))}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
 

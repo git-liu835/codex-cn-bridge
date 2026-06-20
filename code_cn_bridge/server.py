@@ -788,6 +788,10 @@ def create_app(verbose: bool = False) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models():
+        """返回所有启用的模型列表，格式兼容 OpenAI /v1/models。
+        id 使用 alias（与 config.toml 的 model_info key 一致），
+        让 Codex 桌面版能正确显示和选择模型。
+        """
         cfg = get_config()
         models = []
         for alias, entry in cfg.model_mapping.items():
@@ -796,25 +800,52 @@ def create_app(verbose: bool = False) -> FastAPI:
             if not any(item.get("enabled", True) for item in items):
                 continue
             for item in items:
-                if item.get("enabled", True):
-                    target = item.get("target", alias)
-                    provider_name = item.get("provider", "")
-                    models.append({
-                        "id": target,           # 显示真实模型名（如 deepseek-v4-pro）
-                        "object": "model",
-                        "created": 1700000000,
-                        "owned_by": "cn-bridge", # provider 统一显示为 cn-bridge
-                    })
-                    # 同时保留 alias 作为可选模型 ID（兼容旧请求）
-                    if target != alias and alias != provider_name:
-                        models.append({
-                            "id": alias,
-                            "object": "model",
-                            "created": 1700000000,
-                            "owned_by": "cn-bridge",
-                        })
-                    break
+                if not item.get("enabled", True):
+                    continue
+                target = item.get("target", alias)
+                provider_name = item.get("provider", "cn-bridge")
+                is_mm = item.get("is_multimodal", False)
+                is_img = item.get("is_image_gen", False)
+                is_vid = item.get("is_video_gen", False)
+                is_thinking = item.get("enable_thinking", False)
+
+                # 估算上下文窗口
+                ctx = 200000
+                if "kimi" in alias:
+                    ctx = 2000000
+                elif "minimax" in alias:
+                    ctx = 1000000
+                elif "qwen" in alias:
+                    ctx = 256000
+                elif "doubao" in alias:
+                    ctx = 256000
+                elif "ernie" in alias or "speed-pro" in alias:
+                    ctx = 128000
+                elif "spark" in alias:
+                    ctx = 128000
+                elif "ollama" in alias:
+                    ctx = 8192
+
+                model_obj = {
+                    "id": alias,              # 用 alias 作为 id，与 config.toml 一致
+                    "object": "model",
+                    "created": 1700000000,
+                    "owned_by": provider_name, # 显示真实 provider
+                    "target": target,          # 真实模型名（bridge 内部路由用）
+                    "context_window": ctx,
+                    "capabilities": {
+                        "supports_tool_calls": not is_img and not is_vid,
+                        "supports_streaming": True,
+                        "supports_vision": is_mm,
+                        "supports_image_gen": is_img,
+                        "supports_video_gen": is_vid,
+                        "supports_reasoning": is_thinking,
+                    },
+                }
+                models.append(model_obj)
+                break  # 每个 alias 只取第一个启用的条目
         return {"object": "list", "data": models}
+
 
     @app.post("/admin/reload-config")
     async def admin_reload():

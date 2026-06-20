@@ -818,7 +818,7 @@ async def export_codex_config():
             "",
             "[model_providers.code-cn-bridge]",
             'name = "Code CN Bridge"',
-            f'endpoint = "{endpoint}"',
+            f'base_url = "{endpoint}"',
             'env_key = "OPENAI_API_KEY"',
             'wire_api = "responses"',
             'requires_openai_auth = false',
@@ -826,9 +826,9 @@ async def export_codex_config():
             "",
         ]
 
-        # 模型信息表（让 Codex 知道每个模型的能力）
+        # 模型信息表（让 Codex 知道每个模型的能力，与 /v1/models 端点一致）
         if enabled_models:
-            toml_lines.append("# 启用的模型列表及能力声明")
+            toml_lines.append("# 启用的模型列表及能力声明（与 /v1/models 端点一致）")
             for alias, target, provider_name in enabled_models:
                 # 读取模型条目判断能力
                 entry = cfg.model_mapping.get(alias)
@@ -839,22 +839,34 @@ async def export_codex_config():
                 is_img = item.get("is_image_gen", False)
                 is_vid = item.get("is_video_gen", False)
                 is_mm = item.get("is_multimodal", False)
-                ctx = "200000"  # 默认上下文
+                is_thinking = item.get("enable_thinking", False)
+
+                # 估算上下文窗口（与 /v1/models 一致）
+                ctx = 200000
                 if "kimi" in alias:
-                    ctx = "2000000"
+                    ctx = 2000000
                 elif "minimax" in alias:
-                    ctx = "1000000"
+                    ctx = 1000000
                 elif "qwen" in alias:
-                    ctx = "256000"
+                    ctx = 256000
+                elif "doubao" in alias:
+                    ctx = 256000
+                elif "ernie" in alias or "speed-pro" in alias:
+                    ctx = 128000
+                elif "spark" in alias:
+                    ctx = 128000
+                elif "ollama" in alias:
+                    ctx = 8192
 
                 toml_lines.append(f'[model_providers.code-cn-bridge.model_info."{alias}"]')
                 toml_lines.append(f'name = "{target}"')
                 toml_lines.append(f'context_window = {ctx}')
-                toml_lines.append(f'supports_tool_calls = true')
+                toml_lines.append(f'supports_tool_calls = {"true" if not is_img and not is_vid else "false"}')
                 toml_lines.append(f'supports_streaming = true')
                 toml_lines.append(f'supports_vision = {"true" if is_mm else "false"}')
                 toml_lines.append(f'supports_image_gen = {"true" if is_img else "false"}')
                 toml_lines.append(f'supports_video_gen = {"true" if is_vid else "false"}')
+                toml_lines.append(f'supports_reasoning = {"true" if is_thinking else "false"}')
                 toml_lines.append("")
 
         # 使用示例

@@ -95,6 +95,27 @@ export const api = {
       error?: string;
     }>('/admin/api/codex-auth'),
 
+  // 获取 /v1/models 端点返回的模型列表（Codex 桌面版会调用此端点显示模型）
+  getV1Models: () =>
+    request<{
+      object: string;
+      data: {
+        id: string;
+        object: string;
+        owned_by: string;
+        target?: string;
+        context_window?: number;
+        capabilities?: {
+          supports_tool_calls: boolean;
+          supports_streaming: boolean;
+          supports_vision: boolean;
+          supports_image_gen: boolean;
+          supports_video_gen: boolean;
+          supports_reasoning: boolean;
+        };
+      }[];
+    }>('/v1/models'),
+
   // 关闭
   shutdown: () => request<{ status: string }>('/admin/api/shutdown', { method: 'POST' }),
 };

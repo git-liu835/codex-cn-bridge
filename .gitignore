@@ -69,3 +69,4 @@ CLAUDE.md
 # Temporary verification scripts
 _verify_features.py
 _verify*.py
+_test_*.py
