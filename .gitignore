@@ -62,3 +62,10 @@ CLAUDE.md
 
 # Claude Code session data
 .logicweaver/
+
+# TRAE IDE internal data (specs, rules, sessions)
+.trae/
+
+# Temporary verification scripts
+_verify_features.py
+_verify*.py

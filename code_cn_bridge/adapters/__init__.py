@@ -15,6 +15,10 @@ class AdapterRegistry:
         """注册一个适配器"""
         self._adapters[adapter.name] = adapter
 
+    def register_all(self) -> None:
+        """注册所有内置适配器（便于外部显式调用）"""
+        _register_builtins(self)
+
     def get(self, name: str) -> BaseAdapter | None:
         """按名称获取适配器"""
         return self._adapters.get(name)
@@ -47,6 +51,12 @@ def _register_builtins(reg: AdapterRegistry) -> None:
     from .doubao import DoubaoAdapter
     from .glm import GlmAdapter
     from .agnes import AgnesAdapter
+    from .minimax import MiniMaxAdapter
+    from .hunyuan import HunyuanAdapter
+    from .ernie import ErnieAdapter
+    from .spark import SparkAdapter
+    from .siliconflow import SiliconFlowAdapter
+    from .ollama import OllamaAdapter
 
     reg.register(QwenAdapter())
     reg.register(DeepSeekAdapter())
@@ -54,3 +64,9 @@ def _register_builtins(reg: AdapterRegistry) -> None:
     reg.register(DoubaoAdapter())
     reg.register(GlmAdapter())
     reg.register(AgnesAdapter())
+    reg.register(MiniMaxAdapter())
+    reg.register(HunyuanAdapter())
+    reg.register(ErnieAdapter())
+    reg.register(SparkAdapter())
+    reg.register(SiliconFlowAdapter())
+    reg.register(OllamaAdapter())

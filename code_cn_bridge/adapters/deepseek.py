@@ -13,6 +13,17 @@ class DeepSeekAdapter(BaseAdapter):
     api_key_env = "DEEPSEEK_API_KEY"
     unsupported_features: set[str] = set()  # DeepSeek 对 Chat API 支持完整
 
+    capabilities: dict[str, bool | int] = {
+        "tools": True,
+        "streaming": True,
+        "reasoning": True,
+        "vision": False,
+        "image_gen": False,
+        "video_gen": False,
+        "code_execution": False,
+        "max_tokens": 8192,
+    }
+
     def preprocess_chat_request(self, chat_req: dict) -> dict:
         # DeepSeek 不支持 logprobs
         chat_req.pop("logprobs", None)

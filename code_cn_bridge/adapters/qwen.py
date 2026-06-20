@@ -15,6 +15,17 @@ class QwenAdapter(BaseAdapter):
     unsupported_features: set[str] = set()  # Qwen3 对 Chat API 支持完整
     supports_thinking_budget: bool = False  # Qwen3 仅支持 thinking 开关，不支持 budget_tokens
 
+    capabilities: dict[str, bool | int] = {
+        "tools": True,
+        "streaming": True,
+        "reasoning": True,
+        "vision": True,  # qwen-vl 系列支持视觉
+        "image_gen": False,
+        "video_gen": False,
+        "code_execution": False,
+        "max_tokens": 8192,
+    }
+
     def preprocess_chat_request(self, chat_req: dict) -> dict:
         # 移除千问不支持的字段
         chat_req.pop("logprobs", None)

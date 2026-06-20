@@ -26,6 +26,19 @@ class BaseAdapter(ABC):
     #   "thinking" — 思维链推理
     unsupported_features: set[str] = set()
 
+    # 适配器能力声明 —— 用于路由决策和能力发现
+    # 子类按需覆盖具体字段
+    capabilities: dict[str, bool | int] = {
+        "tools": True,
+        "streaming": True,
+        "reasoning": True,
+        "vision": False,
+        "image_gen": False,
+        "video_gen": False,
+        "code_execution": False,
+        "max_tokens": 8192,
+    }
+
     # 思维链推理能力声明
     # supports_thinking_budget: 是否支持 budget_tokens 参数
     #   True (默认): thinking: {type: "enabled", budget_tokens: N}

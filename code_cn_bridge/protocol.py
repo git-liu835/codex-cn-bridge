@@ -121,12 +121,18 @@ class ResponseCache:
     支持磁盘持久化，bridge 重启后自动恢复缓存，跨会话保留对话记忆。
     """
 
-    def __init__(self, max_size: int = 500):
+    def __init__(self, max_size: int = 500, ttl_seconds: int = 86400):
         self._cache: OrderedDict[str, dict] = OrderedDict()
+        self._timestamps: dict[str, float] = {}  # response_id → 写入时间戳
         self._max_size = max_size
+        self._ttl_seconds = ttl_seconds
         self._lock = threading.RLock()
         self._cache_dir = _get_cache_dir()
         self._load_from_disk()
+
+    def _is_expired(self, ts: float) -> bool:
+        """检查给定时间戳是否已超过 TTL"""
+        return ts > 0 and (_time.time() - ts) > self._ttl_seconds
 
     def _load_from_disk(self) -> None:
         """从磁盘恢复最近的缓存条目"""
@@ -139,11 +145,18 @@ class ResponseCache:
                 reverse=True,
             )
             loaded = 0
+            now = _time.time()
             for fpath in files[:self._max_size]:
                 try:
+                    mtime = fpath.stat().st_mtime
+                    # TTL 检查：过期的磁盘文件直接删除
+                    if (now - mtime) > self._ttl_seconds:
+                        fpath.unlink(missing_ok=True)
+                        continue
                     data = json.loads(fpath.read_text(encoding="utf-8"))
                     resp_id = data.get("id", fpath.stem)
                     self._cache[resp_id] = data
+                    self._timestamps[resp_id] = mtime
                     loaded += 1
                 except Exception:
                     fpath.unlink(missing_ok=True)
@@ -157,8 +170,10 @@ class ResponseCache:
             if response_id in self._cache:
                 self._cache.move_to_end(response_id)
             self._cache[response_id] = response_data
+            self._timestamps[response_id] = _time.time()
             while len(self._cache) > self._max_size:
                 evict_id, _ = self._cache.popitem(last=False)
+                self._timestamps.pop(evict_id, None)
                 self._delete_from_disk(evict_id)
             # 异步写入磁盘（不阻塞主流程）
             self._save_to_disk(response_id, response_data)
@@ -181,6 +196,13 @@ class ResponseCache:
     def get(self, response_id: str) -> dict | None:
         with self._lock:
             if response_id in self._cache:
+                # TTL 检查：过期则视为不存在并删除
+                ts = self._timestamps.get(response_id, 0)
+                if self._is_expired(ts):
+                    self._cache.pop(response_id, None)
+                    self._timestamps.pop(response_id, None)
+                    self._delete_from_disk(response_id)
+                    return None
                 return self._cache.get(response_id)
         # 内存未命中，尝试磁盘回退
         return self._load_single_from_disk(response_id)
@@ -190,13 +212,20 @@ class ResponseCache:
         if not fpath.exists():
             return None
         try:
+            mtime = fpath.stat().st_mtime
+            # TTL 检查：过期的磁盘文件直接删除
+            if self._is_expired(mtime):
+                fpath.unlink(missing_ok=True)
+                return None
             data = json.loads(fpath.read_text(encoding="utf-8"))
             # 加载到内存缓存
             with self._lock:
                 if response_id not in self._cache:
                     self._cache[response_id] = data
+                    self._timestamps[response_id] = mtime
                     while len(self._cache) > self._max_size:
-                        self._cache.popitem(last=False)
+                        evict_id, _ = self._cache.popitem(last=False)
+                        self._timestamps.pop(evict_id, None)
             return data
         except Exception:
             return None
@@ -282,6 +311,38 @@ class ResponseCache:
                 response_id, len(output), len(parts), total_chars,
             )
         return result
+
+    def stats(self) -> dict:
+        """返回缓存统计信息
+
+        Returns:
+            {"count": int, "disk_count": int}
+            - count: 内存缓存条目数
+            - disk_count: 磁盘缓存文件数
+        """
+        with self._lock:
+            count = len(self._cache)
+        try:
+            disk_count = len(list(self._cache_dir.glob("*.json"))) if self._cache_dir.exists() else 0
+        except Exception:
+            disk_count = 0
+        return {"count": count, "disk_count": disk_count}
+
+    def clear_all(self) -> None:
+        """清空内存缓存和磁盘文件"""
+        with self._lock:
+            self._cache.clear()
+            self._timestamps.clear()
+        try:
+            if self._cache_dir.exists():
+                for fpath in self._cache_dir.glob("*.json"):
+                    try:
+                        fpath.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        _logger.info("ResponseCache: 已清空所有缓存 (内存 + 磁盘)")
 
 
 _response_cache: ResponseCache | None = None
@@ -370,6 +431,23 @@ def translate_request(
     if "max_output_tokens" in responses_body:
         chat_req["max_tokens"] = responses_body["max_output_tokens"]
 
+    # ── metadata 回显 (不发送给上游，仅用于响应回显) ────────────
+    metadata = responses_body.get("metadata")
+    if isinstance(metadata, dict):
+        chat_req["_metadata"] = metadata
+
+    # ── include 字段 (控制响应中返回哪些附加内容) ───────────────
+    include = responses_body.get("include")
+    if isinstance(include, list):
+        chat_req["_include"] = include
+
+    # ── store 字段 (控制是否写入 ResponseCache, server.py 使用) ─
+    chat_req["_store"] = responses_body.get("store", True)
+
+    # ── parallel_tool_calls 透传 ────────────────────────────────
+    if "parallel_tool_calls" in responses_body:
+        chat_req["parallel_tool_calls"] = responses_body["parallel_tool_calls"]
+
     # ── reasoning 参数映射 ──────────────────────────────────────
     # Responses API: reasoning: {effort: "low"|"medium"|"high", summary: "auto"}
     # Chat Completions: thinking: {type: "enabled", budget_tokens: N}
@@ -385,27 +463,40 @@ def translate_request(
         chat_req["_thinking_budget"] = budget_map.get(effort, 4096)
         if summary == "none":
             chat_req["_disable_thinking"] = True
+        # reasoning.generate_summary — 控制是否生成推理摘要
+        generate_summary = reasoning.get("generate_summary")
+        if isinstance(generate_summary, str):
+            chat_req["_reasoning_generate_summary"] = generate_summary
+        # reasoning.exclude — 控制是否在响应中排除 reasoning 输出项
+        if reasoning.get("exclude"):
+            chat_req["_reasoning_exclude"] = True
     else:
         chat_req.setdefault("_thinking_budget", 4096)
 
     # ── text.format → response_format (结构化输出) ────────────
     # Responses API: text: {format: {type: "json_schema", name: "...", schema: {...}}}
+    #                text: {format: {type: "json_object"}}
     # Chat Completions: response_format: {type: "json_schema", json_schema: {...}}
+    #                   response_format: {type: "json_object"}
     text_cfg = responses_body.get("text")
     if isinstance(text_cfg, dict):
         fmt = text_cfg.get("format")
-        if isinstance(fmt, dict) and fmt.get("type") == "json_schema":
-            schema = fmt.get("schema", {})
-            name = fmt.get("name", "response_schema")
-            strict = fmt.get("strict", True)
-            chat_req["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": name,
-                    "schema": schema,
-                    "strict": strict,
-                },
-            }
+        if isinstance(fmt, dict):
+            fmt_type = fmt.get("type")
+            if fmt_type == "json_schema":
+                schema = fmt.get("schema", {})
+                name = fmt.get("name", "response_schema")
+                strict = fmt.get("strict", True)
+                chat_req["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": name,
+                        "schema": schema,
+                        "strict": strict,
+                    },
+                }
+            elif fmt_type == "json_object":
+                chat_req["response_format"] = {"type": "json_object"}
 
     # ── 对话压缩 + 截断（保留记忆）─────────────────────────────
     # 两步策略：
@@ -496,6 +587,50 @@ def _extract_reasoning_text(item: dict) -> str:
             if text:
                 parts.append(text)
     return "\n".join(parts)
+
+
+def _flatten_function_call_output(output_parts: list) -> str:
+    """将 function_call_output 的多类型内容列表拼接为结构化文本
+
+    支持的内容类型:
+    - output_text / text / input_text: 直接提取 text 字段
+    - image: 记录为 [image: url] 占位
+    - json: 序列化为 JSON 字符串
+    - 其他未知类型: 尝试提取 text，否则序列化整个 part
+
+    多个部分用换行连接，保持结构化信息不丢失。
+    """
+    if not output_parts:
+        return ""
+    segments: list[str] = []
+    for part in output_parts:
+        if not isinstance(part, dict):
+            segments.append(str(part))
+            continue
+        ptype = part.get("type", "")
+        if ptype in ("output_text", "text", "input_text"):
+            text = part.get("text", "")
+            if text:
+                segments.append(text)
+        elif ptype == "image":
+            img_url = part.get("image_url", "")
+            if isinstance(img_url, dict):
+                img_url = img_url.get("url", "")
+            segments.append(f"[image: {img_url}]" if img_url else "[image]")
+        elif ptype == "json":
+            segments.append(json.dumps(part.get("json", part.get("data", "")), ensure_ascii=False))
+        elif ptype == "refusal":
+            text = part.get("refusal", "") or part.get("text", "")
+            if text:
+                segments.append(text)
+        else:
+            # 未知类型：优先提取 text，否则序列化整个 part
+            text = part.get("text", "")
+            if text:
+                segments.append(text)
+            else:
+                segments.append(json.dumps(part, ensure_ascii=False))
+    return "\n".join(s for s in segments if s)
 
 
 def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
@@ -618,10 +753,10 @@ def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
             # tool_calls 合并为一条 assistant 消息（codex-relay 做法）
             _flush_tool_calls(flush_all=True)
 
-            # output 可能是字符串或结构化的 output_text 列表
+            # output 可能是字符串或结构化的多类型内容列表
             output = item.get("output", "")
             if isinstance(output, list):
-                output = "".join(p.get("text", "") for p in output)
+                output = _flatten_function_call_output(output)
             elif not isinstance(output, str):
                 output = str(output)
 
@@ -1096,9 +1231,24 @@ def translate_response(
     chat_resp: dict,
     adapter: BaseAdapter,
     model: str,
+    chat_req: dict | None = None,
 ) -> dict:
-    """将 Chat Completions 响应转换为 Responses API 格式"""
+    """将 Chat Completions 响应转换为 Responses API 格式
+
+    Args:
+        chat_resp: 上游 Chat Completions 响应
+        adapter: 模型适配器
+        model: 目标模型名
+        chat_req: 原始 Chat 请求（可选），用于读取 _metadata / _include /
+                  _reasoning_exclude 等内部字段以控制响应回显
+    """
     chat_resp = adapter.postprocess_chat_response(chat_resp)
+
+    # 从 chat_req 提取内部控制字段
+    reasoning_exclude = bool(chat_req.get("_reasoning_exclude")) if chat_req else False
+    include_list: list[str] = chat_req.get("_include") if chat_req else None
+    want_encrypted_reasoning = bool(include_list and "reasoning.encrypted_content" in include_list)
+    metadata = chat_req.get("_metadata") if chat_req else None
 
     choices = chat_resp.get("choices", [])
     usage = chat_resp.get("usage", {})
@@ -1111,16 +1261,24 @@ def translate_response(
         reasoning_content = msg.get("reasoning_content", "")
 
         # 推理内容 → reasoning 输出项
-        if reasoning_content:
+        # reasoning.exclude=True 时不返回 reasoning 输出项
+        if reasoning_content and not reasoning_exclude:
             save_last_reasoning(reasoning_content)
             reasoning_id = _uid("reas")
-            output_items.append({
+            reasoning_item = {
                 "id": reasoning_id,
                 "object": "realtime.item",
                 "type": "reasoning",
                 "status": "completed",
                 "content": [{"type": "summary_text", "text": reasoning_content}],
-            })
+            }
+            # 仅当 include 包含 reasoning.encrypted_content 时才附加加密内容字段
+            if want_encrypted_reasoning:
+                reasoning_item["encrypted_content"] = reasoning_content
+            output_items.append(reasoning_item)
+        elif reasoning_content and reasoning_exclude:
+            # reasoning.exclude=True：仍保存 reasoning 供下一轮恢复，但不输出
+            save_last_reasoning(reasoning_content)
 
         # 文本内容
         if content:
@@ -1138,7 +1296,13 @@ def translate_response(
                 make_function_call_output_item(name, arguments, call_id)
             )
 
-    return build_responses_response(output_items, model, _normalize_usage(usage))
+    responses_resp = build_responses_response(output_items, model, _normalize_usage(usage))
+
+    # 回显 metadata（不发送给上游，仅用于响应回显）
+    if isinstance(metadata, dict):
+        responses_resp["metadata"] = metadata
+
+    return responses_resp
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1151,12 +1315,13 @@ class StreamTranslator:
     将 Chat Completions 的 SSE 流逐块转换为 Responses API 的 SSE 事件流。
     """
 
-    def __init__(self, response_id: str | None = None, model: str = ""):
+    def __init__(self, response_id: str | None = None, model: str = "", chat_req: dict | None = None):
         self.response_id = response_id or _uid("resp")
         self.model = model
 
         # 状态
         self._created_sent = False
+        self._in_progress_sent = False
         self._done = False
         self._output_index = -1
 
@@ -1185,6 +1350,13 @@ class StreamTranslator:
         self._accumulated_text = ""
         self._finish_reason = ""
         self._usage: dict = {}  # 从最后一个 chunk 捕获的 usage 信息
+
+        # 从 chat_req 读取内部控制字段
+        self._reasoning_exclude = bool(chat_req.get("_reasoning_exclude")) if chat_req else False
+        self._reasoning_generate_summary = chat_req.get("_reasoning_generate_summary") if chat_req else ""
+        include_list = chat_req.get("_include") if chat_req else None
+        self._want_encrypted_reasoning = bool(include_list and "reasoning.encrypted_content" in include_list)
+        self._metadata = chat_req.get("_metadata") if chat_req else None
 
     # ── 入口 ─────────────────────────────────────────────────────
 
@@ -1226,6 +1398,17 @@ class StreamTranslator:
         if not self._created_sent:
             yield from self._emit_created()
 
+        # 首个上游 chunk 到达时发送 response.in_progress 事件
+        if not self._in_progress_sent:
+            self._in_progress_sent = True
+            yield _sse_line({
+                "type": "response.in_progress",
+                "response": {
+                    "id": self.response_id,
+                    "status": "in_progress",
+                },
+            })
+
         # 捕获 usage 信息（通常出现在最后一个 chunk 中）
         usage = chunk.get("usage")
         if isinstance(usage, dict):
@@ -1245,9 +1428,13 @@ class StreamTranslator:
         # 推理增量 (reasoning_content → reasoning item)
         # 将模型的内部推理转换为 Responses API 的 reasoning 输出项，
         # 让 Codex 能正确展示和使用模型的思考过程
+        # reasoning.exclude=True 时不输出 reasoning 项
         reasoning = delta.get("reasoning_content")
-        if reasoning:
+        if reasoning and not self._reasoning_exclude:
             yield from self._handle_reasoning_delta(reasoning)
+        elif reasoning and self._reasoning_exclude:
+            # 仍累积 reasoning 供后续恢复，但不发送事件
+            self._reasoning_buf.append(reasoning)
 
         # 当推理结束、实际内容开始时，先关闭推理项
         content = delta.get("content")
@@ -1292,23 +1479,46 @@ class StreamTranslator:
         # ── 根据 finish_reason 决定 response 状态 ──────────────
         # "tool_calls" / "function_call" → Codex 需要执行工具
         # "stop" → 正常完成
-        # "length" → token 截断
+        # "length" → token 截断 → 发送 response.incomplete
         # 其他 / 有错误 → 失败
         has_tool_calls = bool(self._tc_buf)
-        if has_tool_calls:
-            status = "requires_action"
-        elif self._finish_reason in ("stop", ""):
-            status = "completed"
-        elif self._finish_reason == "length":
-            status = "completed"  # 截断也算完成，让 Codex 自己处理
+        is_truncated = (self._finish_reason == "length")
+
+        if is_truncated:
             _logger.warning(
                 "StreamTranslator: token 截断! finish_reason=length, output_items=%d, usage=%s",
                 len(self._output_items), self._usage,
             )
+            # response.incomplete — token 截断时发送，而非 response.completed
+            incomplete_event: dict = {
+                "type": "response.incomplete",
+                "response": {
+                    "id": self.response_id,
+                    "object": "response",
+                    "model": self.model,
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "output": self._output_items,
+                    "usage": _normalize_usage(self._usage),
+                },
+            }
+            # 回显 metadata
+            if isinstance(self._metadata, dict):
+                incomplete_event["response"]["metadata"] = self._metadata
+            events.append(_sse_line(incomplete_event))
+            self._done = True
+            _logger.debug("StreamTranslator: response.incomplete id=%s output_items=%d usage=%s",
+                self.response_id, len(self._output_items), incomplete_event["response"].get("usage", {}))
+            return events
+
+        if has_tool_calls:
+            status = "requires_action"
+        elif self._finish_reason in ("stop", ""):
+            status = "completed"
         else:
             status = "completed"
 
-        # response.completed
+        # response.completed — 包含完整的 usage 和 output 数组
         completed_event: dict = {
             "type": "response.completed",
             "response": {
@@ -1321,6 +1531,9 @@ class StreamTranslator:
         }
         # 附加 usage 信息（转换为 Responses API 字段名）
         completed_event["response"]["usage"] = _normalize_usage(self._usage)
+        # 回显 metadata
+        if isinstance(self._metadata, dict):
+            completed_event["response"]["metadata"] = self._metadata
 
         events.append(_sse_line(completed_event))
         self._done = True
@@ -1413,6 +1626,9 @@ class StreamTranslator:
             item["status"] = "completed"
             if item["content"]:
                 item["content"][0]["text"] = reasoning_text
+            # 仅当 include 包含 reasoning.encrypted_content 时才附加加密内容字段
+            if self._want_encrypted_reasoning:
+                item["encrypted_content"] = reasoning_text
 
         # event: response.reasoning_summary_part.done
         events.append(

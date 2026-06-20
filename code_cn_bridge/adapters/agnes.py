@@ -29,6 +29,17 @@ class AgnesAdapter(BaseAdapter):
     unsupported_features: set[str] = set()  # Agnes 对 Chat API 支持完整
     supports_thinking_budget: bool = False  # 仅支持 thinking 开关，不支持 budget_tokens
 
+    capabilities: dict[str, bool | int] = {
+        "tools": True,
+        "streaming": True,
+        "reasoning": True,
+        "vision": True,
+        "image_gen": True,
+        "video_gen": True,
+        "code_execution": False,
+        "max_tokens": 8192,
+    }
+
     def preprocess_chat_request(self, chat_req: dict) -> dict:
         # 移除 Agnes 不支持的字段
         chat_req.pop("logprobs", None)

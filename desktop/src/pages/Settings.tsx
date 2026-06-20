@@ -20,6 +20,14 @@ const Settings: React.FC = () => {
   const [saved, setSaved] = useState(false);
   const [importYaml, setImportYaml] = useState('');
 
+  // Codex 配置助手状态
+  const [codexConfig, setCodexConfig] = useState('');
+  const [codexAuth, setCodexAuth] = useState('');
+  const [codexMeta, setCodexMeta] = useState<{ default_model: string; enabled_count: number } | null>(null);
+  const [codexLoading, setCodexLoading] = useState(false);
+  const [codexError, setCodexError] = useState('');
+  const [copiedField, setCopiedField] = useState<'config' | 'auth' | ''>('');
+
   const load = useCallback(async () => {
     try {
       const s = await api.getSettings();
@@ -102,6 +110,47 @@ const Settings: React.FC = () => {
     reader.onload = () => setImportYaml(reader.result as string);
     reader.onerror = () => alert(tl('common.error') + ': ' + (reader.error?.message || ''));
     reader.readAsText(file);
+  };
+
+  // ═══ Codex 配置助手 ═══
+  const handleLoadCodex = async () => {
+    setCodexLoading(true);
+    setCodexError('');
+    try {
+      const [cfgData, authData] = await Promise.all([api.getCodexConfig(), api.getCodexAuth()]);
+      if (cfgData.error) { setCodexError(cfgData.error); return; }
+      if (authData.error) { setCodexError(authData.error); return; }
+      setCodexConfig(cfgData.config);
+      setCodexAuth(authData.auth_json);
+      setCodexMeta({ default_model: cfgData.default_model, enabled_count: cfgData.enabled_count });
+    } catch (err: any) {
+      setCodexError(err.message || String(err));
+    } finally {
+      setCodexLoading(false);
+    }
+  };
+
+  const downloadText = (filename: string, content: string) => {
+    if (window.electronAPI) {
+      window.electronAPI.saveFile({ defaultPath: filename, content });
+    } else {
+      const blob = new Blob([content], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      a.click(); URL.revokeObjectURL(url);
+    }
+  };
+
+  const handleCopy = async (field: 'config' | 'auth') => {
+    const text = field === 'config' ? codexConfig : codexAuth;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedField(field);
+      setTimeout(() => setCopiedField(''), 2000);
+    } catch {
+      // 回退：选中文本
+    }
   };
 
   return (
@@ -199,6 +248,76 @@ const Settings: React.FC = () => {
         <div className="btn-row" style={{ marginTop: 12 }}>
           <button className="btn btn-outline" onClick={handleExport}>{tl('settings.export')}</button>
         </div>
+      </section>
+
+      {/* ═══ Codex 配置助手 ════════════════════════════════════ */}
+      <section className="settings-section">
+        <h3>{tl('settings.codexAssistant')}</h3>
+        <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: '0 0 12px' }}>
+          {tl('settings.codexAssistantDesc')}
+        </p>
+
+        <div className="btn-row" style={{ marginBottom: 12 }}>
+          <button className="btn btn-primary" onClick={handleLoadCodex} disabled={codexLoading}>
+            {codexLoading ? tl('settings.codexLoading') : tl('settings.codexLoad')}
+          </button>
+        </div>
+
+        {codexError && (
+          <div style={{ color: 'var(--danger, #e53e3e)', fontSize: 13, marginBottom: 12 }}>
+            {codexError}
+          </div>
+        )}
+
+        {codexMeta && (
+          <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-muted)' }}>
+            {codexMeta.enabled_count === 0
+              ? tl('settings.codexNoModel')
+              : `${tl('settings.codexEnabledPrefix')} ${codexMeta.enabled_count} ${tl('settings.codexEnabledSuffix')} ${codexMeta.default_model || '-'}`}
+          </div>
+        )}
+
+        {codexConfig && (
+          <>
+            <div className="form-group full-width" style={{ marginBottom: 16 }}>
+              <label>{tl('settings.codexConfigToml')}</label>
+              <textarea value={codexConfig} readOnly rows={14}
+                style={{ fontFamily: 'monospace', fontSize: 12, width: '100%' }} />
+              <div style={{ marginTop: 6, display: 'flex', gap: 8 }}>
+                <button className="btn btn-sm" onClick={() => handleCopy('config')}>
+                  {copiedField === 'config' ? tl('settings.codexCopied') : tl('settings.codexCopy')}
+                </button>
+                <button className="btn btn-sm" onClick={() => downloadText('config.toml', codexConfig)}>
+                  {tl('settings.codexDownloadConfig')}
+                </button>
+              </div>
+            </div>
+
+            <div className="form-group full-width">
+              <label>{tl('settings.codexAuthJson')}</label>
+              <textarea value={codexAuth} readOnly rows={4}
+                style={{ fontFamily: 'monospace', fontSize: 12, width: '100%' }} />
+              <div style={{ marginTop: 6, display: 'flex', gap: 8 }}>
+                <button className="btn btn-sm" onClick={() => handleCopy('auth')}>
+                  {copiedField === 'auth' ? tl('settings.codexCopied') : tl('settings.codexCopy')}
+                </button>
+                <button className="btn btn-sm" onClick={() => downloadText('auth.json', codexAuth)}>
+                  {tl('settings.codexDownloadAuth')}
+                </button>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12, padding: 12, background: 'var(--bg-elevated, rgba(255,255,255,0.04))', borderRadius: 6, fontSize: 13 }}>
+              <strong>{tl('settings.codexInstructions')}：</strong>
+              <ol style={{ margin: '8px 0 0 20px', lineHeight: 1.8 }}>
+                <li>Windows: 将 config.toml 和 auth.json 放到 <code>%USERPROFILE%\.codex\</code> 目录</li>
+                <li>设置环境变量：<code>set OPENAI_API_KEY=sk-bridge-local</code></li>
+                <li>确保本应用正在运行（代理状态：运行中）</li>
+                <li>命令行运行 <code>codex</code>，无需登录 OpenAI 即可直接使用</li>
+              </ol>
+            </div>
+          </>
+        )}
       </section>
 
       <div className="btn-row" style={{ marginTop: 24 }}>

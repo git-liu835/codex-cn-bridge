@@ -75,6 +75,26 @@ export const api = {
       body: JSON.stringify({ yaml }),
     }),
 
+  // Codex 配置助手（解决登录白屏/Reconnecting）
+  getCodexConfig: () =>
+    request<{
+      config: string;
+      endpoint: string;
+      default_model: string;
+      enabled_count: number;
+      enabled_models: { alias: string; target: string; provider: string }[];
+      error?: string;
+    }>('/admin/api/codex-config'),
+  getCodexAuth: () =>
+    request<{
+      auth_json: string;
+      auth_path: string;
+      config_path: string;
+      endpoint: string;
+      instructions: string[];
+      error?: string;
+    }>('/admin/api/codex-auth'),
+
   // 关闭
   shutdown: () => request<{ status: string }>('/admin/api/shutdown', { method: 'POST' }),
 };

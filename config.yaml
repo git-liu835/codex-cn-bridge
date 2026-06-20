@@ -64,6 +64,60 @@ providers:
     max_retries: 0
     timeout: 120
     tool_calls_enabled: true
+  minimax:
+    adapter: minimax
+    base_url: https://api.minimaxi.com/v1
+    api_key_env: MINIMAX_API_KEY
+    enabled: false
+    extra_headers: {}
+    max_retries: 0
+    timeout: 120
+    tool_calls_enabled: true
+  hunyuan:
+    adapter: hunyuan
+    base_url: https://api.hunyuan.cloud.tencent.com/v1
+    api_key_env: HUNYUAN_API_KEY
+    enabled: false
+    extra_headers: {}
+    max_retries: 0
+    timeout: 120
+    tool_calls_enabled: true
+  ernie:
+    adapter: ernie
+    base_url: https://qianfan.baidubce.com/v2
+    api_key_env: ERNIE_API_KEY
+    enabled: false
+    extra_headers: {}
+    max_retries: 0
+    timeout: 120
+    tool_calls_enabled: true
+  spark:
+    adapter: spark
+    base_url: https://spark-api-open.xf-yun.com/v1
+    api_key_env: SPARK_API_KEY
+    enabled: false
+    extra_headers: {}
+    max_retries: 0
+    timeout: 120
+    tool_calls_enabled: true
+  siliconflow:
+    adapter: siliconflow
+    base_url: https://api.siliconflow.cn/v1
+    api_key_env: SILICONFLOW_API_KEY
+    enabled: false
+    extra_headers: {}
+    max_retries: 0
+    timeout: 120
+    tool_calls_enabled: true
+  ollama:
+    adapter: ollama
+    base_url: http://localhost:11434/v1
+    api_key_env: OLLAMA_API_KEY
+    enabled: false
+    extra_headers: {}
+    max_retries: 0
+    timeout: 120
+    tool_calls_enabled: true
 
 model_mapping:
   gpt-5-code:
@@ -86,6 +140,147 @@ model_mapping:
     target: deepseek-v4-pro
     video_gen_alias: null
     vision_alias: null
+
+  # DeepSeek 最新模型
+  deepseek-v4:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: deepseek
+    target: deepseek-v4
+    video_gen_alias: null
+    vision_alias: null
+
+  # 通义千问 (Qwen) 最新模型 —— 2026 年 5 月发布的 Qwen3.7 系列
+  qwen3.7-max:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: qwen
+    target: qwen3.7-max
+    video_gen_alias: null
+    vision_alias: null
+  qwen3.7-plus:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: qwen
+    target: qwen3.7-plus
+    video_gen_alias: null
+    vision_alias: null
+  qwen3-coder-plus:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: qwen
+    target: qwen3-coder-plus
+    video_gen_alias: null
+    vision_alias: null
+
+  # Kimi 最新模型（k2 系列已下线，k2.6/k2.7-code 为当前主力）
+  kimi-k2-6:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: kimi
+    target: kimi-k2-6
+    video_gen_alias: null
+    vision_alias: null
+  kimi-k2-7-code:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: kimi
+    target: kimi-k2-7-code
+    video_gen_alias: null
+    vision_alias: null
+
+  # 智谱 GLM 最新模型 —— 2026 年 6 月发布的 GLM-5.2 / GLM-5.1
+  glm-5.2:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: zhipu
+    target: glm-5.2
+    video_gen_alias: null
+    vision_alias: null
+  glm-5.1:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: zhipu
+    target: glm-5.1
+    video_gen_alias: null
+    vision_alias: null
+  glm-5:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: zhipu
+    target: glm-5
+    video_gen_alias: null
+    vision_alias: null
+  glm-4-plus:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: zhipu
+    target: glm-4-plus
+    video_gen_alias: null
+    vision_alias: null
+
+  # 豆包 / 火山方舟 最新模型
+  doubao-seed-1-8:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: doubao
+    target: doubao-seed-1-8
+    video_gen_alias: null
+    vision_alias: null
+  doubao-seed-2-0:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: doubao
+    target: doubao-seed-2-0
+    video_gen_alias: null
+    vision_alias: null
+  doubao-pro-1-5:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: doubao
+    target: doubao-pro-1-5
+    video_gen_alias: null
+    vision_alias: null
+
   agnes-2.0-flash:
     enabled: false
     image_gen_alias: null
@@ -137,7 +332,139 @@ model_mapping:
     video_gen_alias: null
     vision_alias: null
 
+  # MiniMax 最新模型 —— 2026 年 6 月发布的 MiniMax-M3，1M 上下文，原生多模态，Coding/Agent 专用
+  minimax-m3:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: minimax
+    target: MiniMax-M3
+    video_gen_alias: null
+    vision_alias: null
+  minimax-m2.7:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: minimax
+    target: MiniMax-M2.7
+    video_gen_alias: null
+    vision_alias: null
+
+  # 腾讯混元 (Hunyuan)
+  hunyuan-pro:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: hunyuan
+    target: hunyuan-pro
+    video_gen_alias: null
+    vision_alias: null
+  hunyuan-turbo:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: hunyuan
+    target: hunyuan-turbo
+    video_gen_alias: null
+    vision_alias: null
+
+  # 百度文心 (ERNIE)
+  ernie-5.1:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: ernie
+    target: ernie-5.1
+    video_gen_alias: null
+    vision_alias: null
+  ernie-speed-pro:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: ernie
+    target: ernie-speed-pro-128k
+    video_gen_alias: null
+    vision_alias: null
+
+  # 讯飞星火 (Spark)
+  spark-max:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: spark
+    target: spark-max
+    video_gen_alias: null
+    vision_alias: null
+  spark-pro:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: spark
+    target: spark-pro
+    video_gen_alias: null
+    vision_alias: null
+
+  # 硅基流动 (SiliconFlow) —— 聚合多家模型
+  sf-deepseek-v4:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: siliconflow
+    target: deepseek-ai/DeepSeek-V4
+    video_gen_alias: null
+    vision_alias: null
+  sf-qwen3.7-max:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: siliconflow
+    target: Qwen/Qwen3.7-Max
+    video_gen_alias: null
+    vision_alias: null
+
+  # 本地 Ollama
+  ollama-qwen:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: ollama
+    target: qwen3:latest
+    video_gen_alias: null
+    vision_alias: null
+  ollama-deepseek:
+    enabled: false
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: ollama
+    target: deepseek-v3:latest
+    video_gen_alias: null
+    vision_alias: null
+
 vision_routing:
   enabled: true
-  model: doubao-seed-1-8-251228
+  model: doubao-seed-1-8
   provider: doubao

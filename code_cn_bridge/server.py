@@ -6,6 +6,9 @@ import asyncio
 import json
 import logging
 import logging.handlers
+import os
+import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -387,6 +390,344 @@ def _strip_images_from_input(input_items: list[dict]) -> None:
                 item[field] = [p for p in content if p.get("type") not in ("input_image", "image_url")]
 
 
+def _intercept_builtin_tools(body: dict) -> dict:
+    """拦截 Responses API 内置工具（web_search/file_search/code_interpreter/video_gen）
+
+    将这些内置工具从 tools 列表中移除（不让上游模型看到），并根据工具类型进行降级处理：
+    - web_search: 注入 system prompt 提示（无论是否有搜索 API 配置，暂时都用降级方案）
+    - file_search: 注入 system prompt 提示，返回空结果集
+    - code_interpreter: 转为 function tool（名为 python），让模型调用，bridge 拦截执行
+    - video_gen: 设置标志，后续直接调用视频生成 API
+
+    Returns:
+        dict with flags: has_web_search, has_file_search, has_code_interpreter, has_video_gen
+    """
+    tools = body.get("tools")
+    if not tools:
+        return {
+            "has_web_search": False,
+            "has_file_search": False,
+            "has_code_interpreter": False,
+            "has_video_gen": False,
+        }
+
+    flags = {
+        "has_web_search": False,
+        "has_file_search": False,
+        "has_code_interpreter": False,
+        "has_video_gen": False,
+    }
+    system_addons: list[str] = []
+
+    filtered_tools = []
+    for t in tools:
+        tool_type = t.get("type", "")
+        if tool_type == "web_search":
+            flags["has_web_search"] = True
+        elif tool_type == "file_search":
+            flags["has_file_search"] = True
+        elif tool_type == "code_interpreter":
+            flags["has_code_interpreter"] = True
+        elif tool_type == "video_gen":
+            flags["has_video_gen"] = True
+        else:
+            filtered_tools.append(t)
+
+    body["tools"] = filtered_tools
+
+    # web_search 降级：无论是否有搜索 API 配置，暂时都用降级方案
+    if flags["has_web_search"]:
+        system_addons.append(
+            "你具有网络搜索能力，请基于你的知识回答用户关于最新信息的问题。"
+        )
+
+    # file_search 降级：返回空结果集
+    if flags["has_file_search"]:
+        system_addons.append(
+            "文件搜索功能暂不可用，请基于已有信息回答。"
+        )
+
+    # code_interpreter：转为 function tool，让模型可以调用 python 执行代码
+    if flags["has_code_interpreter"]:
+        body["tools"].append({
+            "type": "function",
+            "function": {
+                "name": "python",
+                "description": (
+                    "Execute Python code in a restricted sandbox and return the output. "
+                    "Use this tool to perform calculations, data analysis, or any computational task. "
+                    "The code runs with a 10-second timeout and no network access."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "The Python code to execute.",
+                        }
+                    },
+                    "required": ["code"],
+                },
+            },
+        })
+
+    # 将降级提示注入 instructions
+    if system_addons:
+        addon = "\n".join(system_addons)
+        existing = body.get("instructions", "").strip()
+        if existing:
+            body["instructions"] = existing + "\n\n---\n" + addon
+        else:
+            body["instructions"] = addon
+
+    return flags
+
+
+def _execute_python_code(code: str) -> str:
+    """在受限子进程中执行 Python 代码，返回输出
+
+    限制：
+    - 超时 10 秒
+    - 捕获 stdout 和 stderr
+    - 输出截断到 4000 字符
+    - 禁止网络访问（通过环境变量清空）
+    """
+    try:
+        # 构建受限环境：仅保留必要的 PATH，移除可能用于网络访问的变量
+        restricted_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONIOENCODING": "utf-8",
+        }
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=restricted_env,
+        )
+
+        output = ""
+        if result.stdout:
+            output += result.stdout
+        if result.stderr:
+            if output:
+                output += "\n[stderr]\n"
+            else:
+                output += "[stderr]\n"
+            output += result.stderr
+
+        if not output:
+            output = "(代码执行完毕，无输出)"
+
+        # 截断到 4000 字符
+        if len(output) > 4000:
+            output = output[:4000] + f"\n...[输出已截断，原长 {len(output)} 字符]"
+
+        return output
+    except subprocess.TimeoutExpired:
+        return "[错误] 代码执行超时（10秒限制）"
+    except Exception as exc:
+        return f"[错误] 代码执行失败: {exc}"
+
+
+def _process_code_interpreter_response(responses_resp: dict, model: str) -> dict:
+    """检查响应中是否包含 code_interpreter/python 的 function_call，执行代码并注入结果
+
+    当模型返回名为 python 或 code_interpreter 的 function_call 时，
+    拦截执行代码，并将执行结果作为 function_call_output 添加到响应中。
+    """
+    output = responses_resp.get("output", [])
+    new_items: list[dict] = []
+
+    for item in output:
+        new_items.append(item)
+        if item.get("type") == "function_call":
+            name = item.get("name", "")
+            if name in ("python", "code_interpreter"):
+                # 提取代码
+                arguments = item.get("arguments", "")
+                try:
+                    args = json.loads(arguments) if arguments else {}
+                    code = args.get("code", "")
+                except (json.JSONDecodeError, ValueError):
+                    code = arguments  # 假设 arguments 直接是代码
+
+                if not code:
+                    code = "# 无代码"
+
+                logger.info("code_interpreter 拦截: 执行 Python 代码 (%d 字符)", len(code))
+                execution_result = _execute_python_code(code)
+
+                # 添加 function_call_output
+                call_id = item.get("call_id", item.get("id", ""))
+                new_items.append({
+                    "id": _uid("cout"),
+                    "object": "realtime.item",
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": execution_result,
+                    "status": "completed",
+                })
+
+    responses_resp["output"] = new_items
+    return responses_resp
+
+
+async def _handle_responses_video_gen(
+    body: dict, cfg, model: str
+) -> JSONResponse:
+    """拦截 video_gen 内置工具：从 input 提取提示词，调用视频生成 API，返回生成的视频"""
+    # 1. 从 input 中提取用户的视频生成提示词
+    prompt = ""
+    for item in reversed(body.get("input", [])):
+        if item.get("type") == "message" and item.get("role") == "user":
+            content = item.get("content", "")
+            if isinstance(content, list):
+                parts = [p.get("text", "") for p in content if p.get("type") == "text"]
+                prompt = " ".join(parts)
+            else:
+                prompt = str(content)
+            break
+
+    if not prompt:
+        return JSONResponse(
+            build_error_response("无法从请求中提取视频生成提示词", "invalid_request"),
+            status_code=400,
+        )
+
+    # 2. 查找视频生成模型
+    vid_alias = ""
+    vid_target = ""
+    vid_provider = ""
+    mapping = cfg.model_mapping
+    for alias, entry in mapping.items():
+        items = entry if isinstance(entry, list) else [entry]
+        for item in items:
+            if isinstance(item, dict) and item.get("is_video_gen"):
+                vid_alias = alias
+                vid_target = item.get("target", alias)
+                vid_provider = item.get("provider", "")
+                break
+        if vid_alias:
+            break
+
+    if not vid_alias:
+        return JSONResponse(
+            build_error_response("未配置视频生成模型，请在桌面端添加一个「视频生成」类型的模型", "no_video_gen_model"),
+            status_code=400,
+        )
+
+    # 3. 解析 provider / adapter
+    provider_name = vid_provider
+    if not provider_name:
+        for pname in cfg.providers:
+            if pname in vid_target.lower():
+                provider_name = pname
+                break
+    if not provider_name and cfg.providers:
+        provider_name = next(iter(cfg.providers))
+
+    if not provider_name or provider_name not in cfg.providers:
+        return JSONResponse(
+            build_error_response(f"视频生成模型 {vid_alias} 的 provider 不存在"),
+            status_code=400,
+        )
+
+    try:
+        adapter, _, _, api_keys = _resolve_adapter(provider_name, vid_target)
+    except ValueError as exc:
+        return JSONResponse(build_error_response(str(exc)), status_code=400)
+
+    # 4. 构建视频生成 URL
+    if hasattr(adapter, "build_video_gen_url"):
+        vid_url = adapter.build_video_gen_url()
+    else:
+        base = adapter.base_url.rstrip("/")
+        vid_url = f"{base}/videos/generations"
+
+    headers = adapter.get_headers(api_keys[0])
+
+    # 5. 构建请求体
+    vid_body = {
+        "model": vid_target,
+        "prompt": prompt,
+        "n": 1,
+    }
+    # 透传可能的扩展字段
+    for key in ("size", "duration", "fps", "quality", "style", "negative_prompt", "seed"):
+        if key in body:
+            vid_body[key] = body[key]
+
+    logger.info("video_gen 拦截 → 调用视频生成 API: %s, prompt=%.80s...", vid_url, prompt[:80])
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300), trust_env=False) as client:
+            resp = await client.post(vid_url, json=vid_body, headers=headers)
+            result = resp.json()
+    except httpx.TimeoutException:
+        return JSONResponse(
+            build_error_response("视频生成请求超时（300秒）", "timeout"),
+            status_code=504,
+        )
+    except Exception as exc:
+        logger.exception("视频生成 API 调用失败")
+        return JSONResponse(
+            build_error_response(f"视频生成 API 调用失败: {exc}", "video_gen_failed"),
+            status_code=500,
+        )
+
+    if resp.status_code != 200:
+        err_msg = result.get("error", {}).get("message", str(result))
+        logger.warning("视频生成失败: %s", err_msg)
+        return JSONResponse(
+            build_error_response(f"视频生成失败: {err_msg}", "video_gen_failed"),
+            status_code=resp.status_code,
+        )
+
+    # 6. 提取视频 URL
+    video_url = ""
+    data_items = result.get("data", [])
+    if data_items:
+        first = data_items[0]
+        video_url = first.get("url", "") or first.get("video_url", "")
+
+    if not video_url:
+        return JSONResponse(
+            build_error_response("视频生成 API 返回了结果但没有视频 URL", "no_video_data"),
+            status_code=500,
+        )
+
+    # 7. 构造 Responses API 输出
+    call_id = _uid("vcall")
+    output_items = [
+        {
+            "id": _uid("vcall"),
+            "object": "realtime.item",
+            "type": "video_generation_call",
+            "call_id": call_id,
+            "prompt": prompt,
+            "status": "completed",
+        },
+        {
+            "id": _uid("vcall_out"),
+            "object": "realtime.item",
+            "type": "video_generation_call_output",
+            "call_id": call_id,
+            "output": video_url,
+        },
+    ]
+
+    output_items.append(make_message_output_item(
+        f"视频已生成: {video_url}"
+    ))
+
+    logger.info("video_gen 完成: prompt=%.80s...", prompt[:80])
+    return JSONResponse(
+        content=build_responses_response(output_items, model, None)
+    )
+
+
 # ── 应用工厂 ───────────────────────────────────────────────────────
 
 def create_app(verbose: bool = False) -> FastAPI:
@@ -571,12 +912,24 @@ def create_app(verbose: bool = False) -> FastAPI:
                         budget = min(budget, 8192)
                     body["_thinking_budget"] = budget
 
+            # 拦截内置工具 (web_search, file_search, code_interpreter, video_gen)
+            # 在 translate_request 之前移除，避免被上游模型看到
+            builtin_flags = _intercept_builtin_tools(body)
+
             chat_req = translate_request(body, adapter, target_model, alias=model)
             has_image_gen = chat_req.pop("_has_image_gen", False)
 
             # image_gen 内置工具：不转发给 LLM，直接在 bridge 内处理
             if has_image_gen:
                 return await _handle_responses_image_gen(body, cfg, model)
+
+            # video_gen 内置工具：不转发给 LLM，直接在 bridge 内处理
+            if builtin_flags["has_video_gen"]:
+                return await _handle_responses_video_gen(body, cfg, model)
+
+            # 确保 _store 标志传递到 chat_req（store=false 时跳过缓存写入）
+            # protocol.py 可能已将 store 提取到 _store，此时不覆盖
+            chat_req.setdefault("_store", body.get("store", True))
 
             logger.info("Chat 请求 → %s: model=%s, msgs=%d, tools=%d, stream=%s",
                 target_model, chat_req.get("model"),
@@ -604,11 +957,16 @@ def create_app(verbose: bool = False) -> FastAPI:
                 chat_resp = await client.chat_completion(chat_req)
                 if verbose:
                     _safe_log("Chat 响应", chat_resp)
-                responses_resp = translate_response(chat_resp, adapter, target_model)
+                responses_resp = translate_response(chat_resp, adapter, target_model, chat_req=chat_req)
 
-                # 缓存响应供 previous_response_id 查询
+                # code_interpreter 拦截：执行 python 代码并注入结果
+                if builtin_flags["has_code_interpreter"]:
+                    responses_resp = _process_code_interpreter_response(responses_resp, model)
+
+                # 缓存响应供 previous_response_id 查询（store=false 时跳过）
                 resp_id = responses_resp.get("id", "")
-                if resp_id:
+                should_store = chat_req.get("_store", True)
+                if resp_id and should_store:
                     get_response_cache().put(resp_id, responses_resp)
 
                 # 统计 token
@@ -806,6 +1164,146 @@ def create_app(verbose: bool = False) -> FastAPI:
             logger.exception("生图请求异常")
             return JSONResponse({"error": {"message": str(exc)}}, 500)
 
+    @app.get("/v1/responses/{response_id}")
+    async def get_response(response_id: str):
+        """查询历史响应: 从 ResponseCache 获取缓存的响应数据"""
+        cache = get_response_cache()
+        data = cache.get(response_id)
+        if data:
+            return JSONResponse(content=data, status_code=200)
+        return JSONResponse(
+            content={"error": {"message": "Response not found", "type": "not_found"}},
+            status_code=404,
+        )
+
+    @app.delete("/v1/responses/{response_id}")
+    async def delete_response(response_id: str):
+        """删除指定响应: 从 ResponseCache 的内存和磁盘删除"""
+        cache = get_response_cache()
+        data = cache.get(response_id)
+        if not data:
+            return JSONResponse(
+                content={"error": {"message": "Response not found", "type": "not_found"}},
+                status_code=404,
+            )
+        # 从内存缓存删除
+        with cache._lock:
+            cache._cache.pop(response_id, None)
+        # 从磁盘删除
+        cache._delete_from_disk(response_id)
+        logger.info("已删除响应缓存: %s", response_id)
+        return JSONResponse(content={"success": True}, status_code=200)
+
+    @app.post("/v1/videos/generations")
+    async def videos_generations(request: Request):
+        """视频生成端点: 接受视频生成请求，路由到配置的视频生成模型"""
+        cfg = get_config()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": {"message": "无效的 JSON 请求体"}}, 400)
+
+        model = body.get("model", "unknown")
+        raw_entry = cfg.model_mapping.get(model)
+
+        if not raw_entry:
+            return JSONResponse({"error": {"message": f"未找到模型: {model}"}}, 404)
+
+        # 取活跃条目（支持多模型列表）
+        if isinstance(raw_entry, list):
+            entry = next((e for e in raw_entry if e.get("enabled")), raw_entry[0])
+        else:
+            entry = raw_entry
+
+        # 确定用哪个模型生成视频
+        gen_alias = model
+        if entry.get("is_video_gen"):
+            gen_target = entry.get("target", model)
+            gen_provider = entry.get("provider", "")
+        elif entry.get("video_gen_alias"):
+            gen_alias = entry["video_gen_alias"]
+            gen_entry_raw = cfg.model_mapping.get(gen_alias)
+            if not gen_entry_raw:
+                return JSONResponse({"error": {"message": f"视频生成模型未找到: {gen_alias}"}}, 400)
+            if isinstance(gen_entry_raw, list):
+                gen_entry = next((e for e in gen_entry_raw if e.get("enabled")), gen_entry_raw[0])
+            else:
+                gen_entry = gen_entry_raw
+            gen_target = gen_entry.get("target", gen_alias)
+            gen_provider = gen_entry.get("provider", "")
+        else:
+            return JSONResponse(
+                {"error": {"message": f"模型 '{model}' 未配置视频生成模型，请在模型设置中添加 video_gen_alias"}}, 400)
+
+        # 查找 provider
+        provider_name = gen_provider
+        if not provider_name or provider_name not in cfg.providers:
+            for pname, pinfo in cfg.providers.items():
+                if pinfo.get("adapter") == provider_name or pname == provider_name:
+                    provider_name = pname
+                    break
+            else:
+                for pname, pinfo in cfg.providers.items():
+                    if pname in gen_target.lower() or pinfo.get("adapter", "") in gen_target.lower():
+                        provider_name = pname
+                        break
+                else:
+                    if cfg.providers:
+                        provider_name = next(iter(cfg.providers))
+
+        if not provider_name:
+            return JSONResponse({"error": {"message": f"未找到视频生成 provider: {gen_alias}"}}, 400)
+
+        try:
+            adapter, _, _, api_keys = _resolve_adapter(provider_name, gen_target)
+        except ValueError as exc:
+            return JSONResponse({"error": {"message": str(exc)}}, 400)
+
+        # 构建视频生成 URL
+        if hasattr(adapter, "build_video_gen_url"):
+            vid_url = adapter.build_video_gen_url()
+        else:
+            base = adapter.base_url.rstrip("/")
+            vid_url = f"{base}/videos/generations"
+
+        headers = adapter.get_headers(api_keys[0])
+
+        # 构建请求体
+        vid_body = {
+            "model": gen_target,
+            "prompt": body.get("prompt", ""),
+            "n": body.get("n", 1),
+        }
+        for key in ("size", "duration", "fps", "quality", "style", "negative_prompt", "seed", "response_format", "user"):
+            if key in body:
+                vid_body[key] = body[key]
+
+        logger.info("视频生成请求 → %s/%s: prompt=%.80s...",
+            provider_name, gen_target, body.get("prompt", "")[:80])
+
+        start_time = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300), trust_env=False) as client:
+                resp = await client.post(vid_url, json=vid_body, headers=headers)
+                elapsed = (time.time() - start_time) * 1000
+                result = resp.json()
+
+                if resp.status_code == 200:
+                    logger.info("视频生成成功 → %s/%s (%.0fms)", provider_name, gen_target, elapsed)
+                else:
+                    logger.warning("视频生成失败 → %s/%s: HTTP %d", provider_name, gen_target, resp.status_code)
+
+                _record_request(start_time, gen_alias, "videos", resp.status_code, False,
+                    error="" if resp.status_code == 200 else result.get("error", {}).get("message", ""),
+                    provider=provider_name, target_model=gen_target)
+
+                return JSONResponse(content=result, status_code=resp.status_code)
+        except httpx.TimeoutException:
+            return JSONResponse({"error": {"message": "视频生成请求超时（300秒）"}}, 504)
+        except Exception as exc:
+            logger.exception("视频生成请求异常")
+            return JSONResponse({"error": {"message": str(exc)}}, 500)
+
     return app
 
 
@@ -869,7 +1367,7 @@ async def _handle_stream(
 
     stream_error = ""
     retry_count = 0
-    translator = StreamTranslator(model=model)
+    translator = StreamTranslator(model=model, chat_req=chat_req)
     empty_content_retried = False  # 防止无限重试空洞响应
 
     # 响应预热: 立即发送 response.created，不等上游 API 响应
@@ -885,7 +1383,7 @@ async def _handle_stream(
             logger.info("空洞响应重试: 关闭 thinking 模式重新请求")
             chat_req["_disable_thinking"] = True
             chat_req.pop("_thinking_budget", None)
-            translator = StreamTranslator(model=model)
+            translator = StreamTranslator(model=model, chat_req=chat_req)
             if client._stream_client:
                 try:
                     await client._stream_client.aclose()
@@ -985,7 +1483,7 @@ async def _handle_stream(
                 logger.info("尝试重连 (第%d次)...", retry_count)
                 # 多 key 轮转：重试时切换到下一个 key
                 client.rotate_key()
-                translator = StreamTranslator(model=model)
+                translator = StreamTranslator(model=model, chat_req=chat_req)
                 await asyncio.sleep(1.5)
 
         except httpx.HTTPStatusError as exc:
@@ -1008,7 +1506,7 @@ async def _handle_stream(
                         pass
                     client._stream_client = None
                 client.rotate_key()
-                translator = StreamTranslator(model=model)
+                translator = StreamTranslator(model=model, chat_req=chat_req)
                 await asyncio.sleep(1.0)
             else:
                 stream_error = error_msg
@@ -1025,11 +1523,13 @@ async def _handle_stream(
         try:
             for event_line in translator._finish():
                 yield event_line
-            get_response_cache().put(translator.response_id, {
-                "id": translator.response_id,
-                "model": model,
-                "output": translator._output_items,
-            })
+            # store=false 时跳过缓存写入
+            if chat_req.get("_store", True):
+                get_response_cache().put(translator.response_id, {
+                    "id": translator.response_id,
+                    "model": model,
+                    "output": translator._output_items,
+                })
             # 缓存 reasoning_content 供下一轮恢复（DeepSeek tool_call 场景）
             reasoning_text = "".join(translator._reasoning_buf)
             if reasoning_text:

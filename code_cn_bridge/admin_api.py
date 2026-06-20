@@ -677,6 +677,250 @@ async def shutdown():
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 熔断器管理
+# ═══════════════════════════════════════════════════════════════════
+
+@router.get("/circuit-breakers")
+async def list_circuit_breakers():
+    """返回所有 provider 的熔断器状态和健康评分"""
+    from .circuit_breaker import get_circuit_breaker_registry
+    try:
+        registry = get_circuit_breaker_registry()
+        breakers = []
+        for name, breaker in registry.get_all().items():
+            ws = breaker.window_stats
+            breakers.append({
+                "name": name,
+                "state": breaker.state.name,
+                "health_score": breaker.health_score,
+                "window_stats": {
+                    "total": ws.get("total_requests", 0),
+                    "failures": ws.get("failures", 0),
+                    "error_rate": ws.get("error_rate", 0.0),
+                },
+            })
+        return {"breakers": breakers}
+    except Exception as exc:
+        logger.error("获取熔断器状态失败: %s", exc, exc_info=True)
+        return {"breakers": [], "error": str(exc)}
+
+
+@router.post("/circuit-breakers/{provider}/reset")
+async def reset_circuit_breaker(provider: str):
+    """手动重置指定 provider 的熔断器"""
+    from .circuit_breaker import get_circuit_breaker_registry
+    try:
+        registry = get_circuit_breaker_registry()
+        registry.reset(provider)
+        return {"success": True, "provider": provider}
+    except Exception as exc:
+        logger.error("重置熔断器 %s 失败: %s", provider, exc, exc_info=True)
+        return {"success": False, "provider": provider, "error": str(exc)}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ResponseCache 管理
+# ═══════════════════════════════════════════════════════════════════
+
+@router.get("/cache/responses")
+async def get_cache_stats():
+    """返回 ResponseCache 统计"""
+    from .protocol import get_response_cache
+    try:
+        cache = get_response_cache()
+        if hasattr(cache, "stats"):
+            stats = cache.stats()
+            return {
+                "count": stats.get("count", 0),
+                "disk_count": stats.get("disk_count", 0),
+            }
+        logger.warning("ResponseCache.stats() 方法不存在")
+        return {"count": 0, "disk_count": 0}
+    except Exception as exc:
+        logger.error("获取缓存统计失败: %s", exc, exc_info=True)
+        return {"count": 0, "disk_count": 0}
+
+
+@router.delete("/cache/responses")
+async def clear_cache():
+    """清理全部缓存"""
+    from .protocol import get_response_cache
+    try:
+        cache = get_response_cache()
+        if hasattr(cache, "clear_all"):
+            cache.clear_all()
+            return {"success": True, "cleared": True}
+        logger.warning("ResponseCache.clear_all() 方法不存在")
+        return {"success": False, "cleared": False, "error": "clear_all 方法不存在"}
+    except Exception as exc:
+        logger.error("清理缓存失败: %s", exc, exc_info=True)
+        return {"success": False, "cleared": False, "error": str(exc)}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Codex 配置一键导出
+# ═══════════════════════════════════════════════════════════════════
+
+def _collect_enabled_models(cfg) -> list[tuple[str, str, str]]:
+    """收集已启用的模型: [(alias, target, provider), ...]"""
+    enabled = []
+    mapping = cfg.model_mapping
+    for alias, entry in mapping.items():
+        if isinstance(entry, list):
+            for item in entry:
+                if item.get("enabled", True):
+                    target = item.get("target", alias)
+                    provider = item.get("provider", "")
+                    enabled.append((alias, target, provider))
+                    break
+        elif isinstance(entry, dict):
+            if entry.get("enabled", True):
+                target = entry.get("target", alias)
+                provider = entry.get("provider", "")
+                enabled.append((alias, target, provider))
+    return enabled
+
+
+@router.get("/codex-config")
+async def export_codex_config():
+    """生成可直接写入 ~/.codex/config.toml 的完整配置（解决登录白屏/Reconnecting 问题）"""
+    try:
+        cfg = get_config()
+        host = cfg.server_host
+        port = cfg.server_port
+        endpoint = f"http://{host}:{port}/v1"
+
+        enabled_models = _collect_enabled_models(cfg)
+
+        # 选默认模型：优先代码模型，其次第一个启用的
+        code_aliases = {"deepseek-v4", "gpt-5-code", "kimi-k2-7-code", "qwen3-coder-plus"}
+        default_alias = ""
+        default_target = ""
+        for alias, target, _ in enabled_models:
+            if alias in code_aliases:
+                default_alias = alias
+                default_target = target
+                break
+        if not default_alias and enabled_models:
+            default_alias = enabled_models[0][0]
+            default_target = enabled_models[0][1]
+
+        toml_lines = [
+            "# ════════════════════════════════════════════════════════════════",
+            "# Code CN Bridge - Codex 配置（自动生成）",
+            "# 写入位置: ~/.codex/config.toml (Windows: %USERPROFILE%\\.codex\\config.toml)",
+            "# 关键: requires_openai_auth=false 跳过登录, supports_websockets=false 解决 Reconnecting",
+            "# ════════════════════════════════════════════════════════════════",
+            "",
+            "# 默认 provider 和模型（可被 codex -m <alias> 覆盖）",
+            f'model_provider = "code-cn-bridge"',
+            f'model = "{default_alias}"' if default_alias else '# model = "deepseek-v4"',
+            "",
+            "[model_providers.code-cn-bridge]",
+            'name = "Code CN Bridge"',
+            f'endpoint = "{endpoint}"',
+            'env_key = "OPENAI_API_KEY"',
+            'wire_api = "responses"',
+            'requires_openai_auth = false',
+            'supports_websockets = false',
+            "",
+        ]
+
+        # 模型信息表（让 Codex 知道每个模型的能力）
+        if enabled_models:
+            toml_lines.append("# 启用的模型列表及能力声明")
+            for alias, target, provider_name in enabled_models:
+                # 读取模型条目判断能力
+                entry = cfg.model_mapping.get(alias)
+                if isinstance(entry, list):
+                    item = next((e for e in entry if e.get("enabled")), entry[0] if entry else {})
+                else:
+                    item = entry or {}
+                is_img = item.get("is_image_gen", False)
+                is_vid = item.get("is_video_gen", False)
+                is_mm = item.get("is_multimodal", False)
+                ctx = "200000"  # 默认上下文
+                if "kimi" in alias:
+                    ctx = "2000000"
+                elif "minimax" in alias:
+                    ctx = "1000000"
+                elif "qwen" in alias:
+                    ctx = "256000"
+
+                toml_lines.append(f'[model_providers.code-cn-bridge.model_info."{alias}"]')
+                toml_lines.append(f'name = "{target}"')
+                toml_lines.append(f'context_window = {ctx}')
+                toml_lines.append(f'supports_tool_calls = true')
+                toml_lines.append(f'supports_streaming = true')
+                toml_lines.append(f'supports_vision = {"true" if is_mm else "false"}')
+                toml_lines.append(f'supports_image_gen = {"true" if is_img else "false"}')
+                toml_lines.append(f'supports_video_gen = {"true" if is_vid else "false"}')
+                toml_lines.append("")
+
+        # 使用示例
+        toml_lines.extend([
+            "# ════════════════════════════════════════════════════════════════",
+            "# 使用示例:",
+            "#   codex                    # 用默认模型",
+            "#   codex -m deepseek-v4     # 指定模型",
+            "#   codex -m qwen3.7-max     # 通义千问",
+            "#   codex -m glm-5.2         # 智谱 GLM",
+            "#   codex -m kimi-k2-7-code  # Kimi 长上下文",
+            "#",
+            "# 内置工具（bridge 已支持）:",
+            "#   web_search          # 联网搜索",
+            "#   file_search         # 文件检索",
+            "#   code_interpreter    # Python 代码执行",
+            "#   image_gen           # 生图（需启用 agnes-image 等模型）",
+            "#   video_gen           # 生视频（需启用 agnes-video 等模型）",
+            "# ════════════════════════════════════════════════════════════════",
+        ])
+
+        toml_str = "\n".join(toml_lines)
+        return {
+            "config": toml_str,
+            "endpoint": endpoint,
+            "default_model": default_alias,
+            "enabled_count": len(enabled_models),
+            "enabled_models": [{"alias": a, "target": t, "provider": p} for a, t, p in enabled_models],
+        }
+    except Exception as exc:
+        logger.error("生成 Codex 配置失败: %s", exc, exc_info=True)
+        return {"error": str(exc)}
+
+
+@router.get("/codex-auth")
+async def export_codex_auth():
+    """生成 ~/.codex/auth.json 内容（占位 key，绕过 OpenAI 登录白屏）"""
+    try:
+        cfg = get_config()
+        host = cfg.server_host
+        port = cfg.server_port
+        # 占位 key，bridge 不校验
+        placeholder_key = "sk-bridge-local"
+        auth_json = {
+            "OPENAI_API_KEY": placeholder_key,
+        }
+        import json as _json
+        return {
+            "auth_json": _json.dumps(auth_json, indent=2),
+            "auth_path": "~/.codex/auth.json",
+            "config_path": "~/.codex/config.toml",
+            "endpoint": f"http://{host}:{port}/v1",
+            "instructions": [
+                "1. 将 config.toml 内容写入 ~/.codex/config.toml",
+                "2. 将 auth.json 内容写入 ~/.codex/auth.json",
+                "3. 设置环境变量 OPENAI_API_KEY=sk-bridge-local",
+                "4. 确保 bridge 正在运行（桌面应用已启动）",
+                "5. 运行 codex 即可，无需登录 OpenAI",
+            ],
+        }
+    except Exception as exc:
+        logger.error("生成 Codex auth 失败: %s", exc, exc_info=True)
+        return {"error": str(exc)}
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 辅助
 # ═══════════════════════════════════════════════════════════════════
 
@@ -698,3 +942,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             base[k] = v
     return base
+
+
+# 兼容别名：server.py 使用 `from .admin_api import router as admin_router`，
+# 同时支持 `from code_cn_bridge.admin_api import admin_router` 直接导入。
+admin_router = router

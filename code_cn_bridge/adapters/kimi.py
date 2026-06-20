@@ -15,6 +15,17 @@ class KimiAdapter(BaseAdapter):
     unsupported_features: set[str] = set()
     supports_thinking_budget: bool = False  # Kimi 仅支持 thinking 开关，不支持 budget_tokens
 
+    capabilities: dict[str, bool | int] = {
+        "tools": True,
+        "streaming": True,
+        "reasoning": True,
+        "vision": False,
+        "image_gen": False,
+        "video_gen": False,
+        "code_execution": False,
+        "max_tokens": 8192,
+    }
+
     def preprocess_chat_request(self, chat_req: dict) -> dict:
         # Kimi 不支持 logprobs 和 logit_bias
         chat_req.pop("logprobs", None)

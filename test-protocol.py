@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """code CN Bridge v1.0.0 — 协议兼容性测试套件
 
-测试覆盖 10 个场景:
+测试覆盖 20 个场景 + 2 个附加测试:
   1. 普通文本对话（无工具）
   2. 单次工具调用
   3. 并行工具调用
@@ -12,6 +12,18 @@
   8. 流式传输异常恢复
   9. truncation 自动截断
   10. tool_choice 精确指定
+  11. metadata 字段透传
+  12. parallel_tool_calls 透传
+  13. store 字段
+  14. json_object 格式
+  15. reasoning.exclude
+  16. 流式 response.in_progress 事件
+  17. 流式 response.incomplete 事件
+  18. ResponseCache TTL
+  19. ResponseCache stats 和 clear_all
+  20. 适配器 capabilities
+  附加: 非流式 Chat → Responses 响应转换
+  附加: reasoning_content → reasoning 输出项
 
 用法:
   python test-protocol.py           # 仅单元测试（翻译逻辑，无需 API Key）
@@ -145,9 +157,14 @@ def test_01_basic_text():
         assert chat_req["messages"][1]["content"] == "解释一下量子计算", "user content 不匹配"
         assert chat_req["model"] == "deepseek-v4-pro", "目标模型不匹配"
         assert chat_req["temperature"] == 0.7, "temperature 未映射"
-        assert chat_req["max_tokens"] == 2048, "max_output_tokens 未映射"
+        # max_output_tokens=2048 在 translate_request 中被映射为 max_tokens=2048，
+        # 随后 DeepSeek 适配器 preprocess_chat_request 因默认启用 thinking
+        # (budget=4096) 会把 max_tokens 提升到 budget + 16384 = 20480，
+        # 以确保有足够空间容纳思考 + 正文输出。这是适配器的正常行为。
+        assert chat_req.get("max_tokens") == 20480, \
+            f"max_tokens 应为 20480 (budget 4096 + 16384), 实际 {chat_req.get('max_tokens')}"
         assert chat_req.get("stream") is False, "stream 应为 False"
-        ok("请求转换 — 消息映射、参数透传全部正确")
+        ok("请求转换 — 消息映射、参数透传全部正确 (max_tokens 经适配器提升至 20480)")
     except AssertionError as e:
         fail(f"请求转换 — {e}")
 
@@ -558,9 +575,339 @@ def test_10_tool_choice_precise():
         fail(f"tool_choice 精确指定 — {e}")
 
 
+# ── 场景 11: metadata 字段透传 ─────────────────────────────────
+
+def test_11_metadata_passthrough():
+    section("场景 11: metadata 字段透传")
+
+    from code_cn_bridge.protocol import translate_request
+    from code_cn_bridge.adapters import get_registry
+
+    adapter = get_registry().get("deepseek")
+    req = _new_resp(
+        input=[{"role": "user", "content": "你好"}],
+        metadata={"session_id": "test-123"},
+    )
+    chat_req = translate_request(req, adapter, "deepseek-v4-pro")
+
+    try:
+        assert "_metadata" in chat_req, "缺少 _metadata 字段"
+        assert chat_req["_metadata"]["session_id"] == "test-123", \
+            f"session_id 不匹配, 实际 {chat_req['_metadata'].get('session_id')}"
+        ok("metadata 字段正确透传到 _metadata")
+    except AssertionError as e:
+        fail(f"metadata 透传 — {e}")
+
+
+# ── 场景 12: parallel_tool_calls 透传 ──────────────────────────
+
+def test_12_parallel_tool_calls_passthrough():
+    section("场景 12: parallel_tool_calls 透传")
+
+    from code_cn_bridge.protocol import translate_request
+    from code_cn_bridge.adapters import get_registry
+
+    adapter = get_registry().get("deepseek")
+    req = _new_resp(
+        input=[{"role": "user", "content": "查天气"}],
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "获取天气",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }],
+        parallel_tool_calls=False,
+    )
+    chat_req = translate_request(req, adapter, "deepseek-v4-pro")
+
+    try:
+        assert "parallel_tool_calls" in chat_req, "缺少 parallel_tool_calls 字段"
+        assert chat_req["parallel_tool_calls"] is False, \
+            f"parallel_tool_calls 应为 False, 实际 {chat_req.get('parallel_tool_calls')}"
+        ok("parallel_tool_calls=False 正确透传")
+    except AssertionError as e:
+        fail(f"parallel_tool_calls 透传 — {e}")
+
+
+# ── 场景 13: store 字段 ────────────────────────────────────────
+
+def test_13_store_field():
+    section("场景 13: store 字段")
+
+    from code_cn_bridge.protocol import translate_request
+    from code_cn_bridge.adapters import get_registry
+
+    adapter = get_registry().get("deepseek")
+    req = _new_resp(
+        input=[{"role": "user", "content": "你好"}],
+        store=False,
+    )
+    chat_req = translate_request(req, adapter, "deepseek-v4-pro")
+
+    try:
+        assert "_store" in chat_req, "缺少 _store 字段"
+        assert chat_req["_store"] is False, \
+            f"_store 应为 False, 实际 {chat_req.get('_store')}"
+        ok("store=False 正确映射到 _store")
+    except AssertionError as e:
+        fail(f"store 字段 — {e}")
+
+
+# ── 场景 14: json_object 格式 ──────────────────────────────────
+
+def test_14_json_object_format():
+    section("场景 14: json_object 格式")
+
+    from code_cn_bridge.protocol import translate_request
+    from code_cn_bridge.adapters import get_registry
+
+    adapter = get_registry().get("deepseek")
+    req = _new_resp(
+        input=[{"role": "user", "content": "返回一个 JSON 对象"}],
+        text={"format": {"type": "json_object"}},
+    )
+    chat_req = translate_request(req, adapter, "deepseek-v4-pro")
+
+    try:
+        assert "response_format" in chat_req, "缺少 response_format"
+        rf = chat_req["response_format"]
+        assert rf["type"] == "json_object", \
+            f"response_format.type 应为 json_object, 实际 {rf.get('type')}"
+        ok("text.format.type=json_object 正确映射为 response_format.type=json_object")
+    except AssertionError as e:
+        fail(f"json_object 格式 — {e}")
+
+
+# ── 场景 15: reasoning.exclude ─────────────────────────────────
+
+def test_15_reasoning_exclude():
+    section("场景 15: reasoning.exclude")
+
+    from code_cn_bridge.protocol import translate_request
+    from code_cn_bridge.adapters import get_registry
+
+    adapter = get_registry().get("deepseek")
+    req = _new_resp(
+        input=[{"role": "user", "content": "思考一下"}],
+        reasoning={"effort": "medium", "exclude": True},
+    )
+    chat_req = translate_request(req, adapter, "deepseek-v4-pro")
+
+    try:
+        assert chat_req.get("_reasoning_exclude") is True, \
+            f"_reasoning_exclude 应为 True, 实际 {chat_req.get('_reasoning_exclude')}"
+        ok("reasoning.exclude=True 正确映射到 _reasoning_exclude")
+    except AssertionError as e:
+        fail(f"reasoning.exclude — {e}")
+
+
+# ── 场景 16: 流式 response.in_progress 事件 ───────────────────
+
+def test_16_stream_in_progress():
+    section("场景 16: 流式 response.in_progress 事件")
+
+    from code_cn_bridge.protocol import StreamTranslator
+
+    chunks = [
+        {
+            "choices": [{"delta": {"content": "你好"}, "finish_reason": ""}],
+        },
+        {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+        },
+    ]
+
+    translator = StreamTranslator(model="deepseek-v4-pro")
+    events_seen: list[dict] = []
+
+    try:
+        for chunk in chunks:
+            for line in translator.translate_chunk(chunk):
+                line = line.strip()
+                if line.startswith("data: "):
+                    events_seen.append(json.loads(line[6:]))
+
+        event_types = [e["type"] for e in events_seen]
+        assert "response.in_progress" in event_types, \
+            f"缺少 response.in_progress 事件, 收到: {event_types}"
+        in_progress = next(e for e in events_seen if e["type"] == "response.in_progress")
+        assert in_progress["response"]["status"] == "in_progress", \
+            f"in_progress 状态错误, 实际 {in_progress['response'].get('status')}"
+        ok("流式响应包含 response.in_progress 事件 (status=in_progress)")
+    except AssertionError as e:
+        fail(f"流式 in_progress — {e}")
+    except Exception as e:
+        fail(f"流式 in_progress — {e}", traceback.format_exc())
+
+
+# ── 场景 17: 流式 response.incomplete 事件 ────────────────────
+
+def test_17_stream_incomplete():
+    section("场景 17: 流式 response.incomplete 事件")
+
+    from code_cn_bridge.protocol import StreamTranslator
+
+    # finish_reason="length" 表示 token 截断，应触发 response.incomplete
+    chunks = [
+        {
+            "choices": [{"delta": {"content": "这是一段被截断的输出"}, "finish_reason": ""}],
+        },
+        {
+            "choices": [{"delta": {}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 100, "total_tokens": 110},
+        },
+    ]
+
+    translator = StreamTranslator(model="deepseek-v4-pro")
+    events_seen: list[dict] = []
+
+    try:
+        for chunk in chunks:
+            for line in translator.translate_chunk(chunk):
+                line = line.strip()
+                if line.startswith("data: "):
+                    events_seen.append(json.loads(line[6:]))
+
+        event_types = [e["type"] for e in events_seen]
+        assert "response.incomplete" in event_types, \
+            f"缺少 response.incomplete 事件, 收到: {event_types}"
+        assert "response.completed" not in event_types, \
+            "finish_reason=length 时不应发送 response.completed"
+
+        incomplete = next(e for e in events_seen if e["type"] == "response.incomplete")
+        assert incomplete["response"]["status"] == "incomplete", \
+            f"status 应为 incomplete, 实际 {incomplete['response'].get('status')}"
+        assert incomplete["response"]["incomplete_details"]["reason"] == "max_output_tokens", \
+            f"incomplete_details.reason 应为 max_output_tokens, 实际 {incomplete['response'].get('incomplete_details')}"
+        ok("finish_reason=length 正确触发 response.incomplete (而非 response.completed)")
+    except AssertionError as e:
+        fail(f"流式 incomplete — {e}")
+    except Exception as e:
+        fail(f"流式 incomplete — {e}", traceback.format_exc())
+
+
+# ── 场景 18: ResponseCache TTL ─────────────────────────────────
+
+def test_18_response_cache_ttl():
+    section("场景 18: ResponseCache TTL")
+
+    from code_cn_bridge.protocol import ResponseCache
+
+    # 使用 ttl_seconds=1 以便快速验证过期行为
+    cache = ResponseCache(max_size=10, ttl_seconds=1)
+    cache.clear_all()
+
+    try:
+        cache.put("resp_ttl_test", {
+            "id": "resp_ttl_test",
+            "model": "gpt-5-code",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "hello"}]}],
+        })
+
+        # 立即获取应命中
+        immediate = cache.get("resp_ttl_test")
+        assert immediate is not None, "刚 put 的响应不应为 None"
+
+        # 等待 2 秒使其过期
+        time.sleep(2)
+
+        expired = cache.get("resp_ttl_test")
+        assert expired is None, f"TTL 过期后应返回 None, 实际 {expired}"
+        ok("ResponseCache TTL 过期正确 (ttl=1s, 等待 2s 后返回 None)")
+    except AssertionError as e:
+        fail(f"ResponseCache TTL — {e}")
+    finally:
+        cache.clear_all()
+
+
+# ── 场景 19: ResponseCache stats 和 clear_all ─────────────────
+
+def test_19_response_cache_stats_clear():
+    section("场景 19: ResponseCache stats 和 clear_all")
+
+    from code_cn_bridge.protocol import ResponseCache
+
+    cache = ResponseCache(max_size=100, ttl_seconds=86400)
+    cache.clear_all()
+
+    try:
+        # 初始应为空
+        assert cache.stats()["count"] == 0, "初始 count 应为 0"
+
+        # put 几个响应
+        for i in range(3):
+            cache.put(f"resp_stats_{i}", {
+                "id": f"resp_stats_{i}",
+                "model": "gpt-5-code",
+                "output": [],
+            })
+
+        stats_after_put = cache.stats()
+        assert stats_after_put["count"] > 0, \
+            f"put 后 count 应 > 0, 实际 {stats_after_put['count']}"
+
+        # clear_all 后应为空
+        cache.clear_all()
+        stats_after_clear = cache.stats()
+        assert stats_after_clear["count"] == 0, \
+            f"clear_all 后 count 应为 0, 实际 {stats_after_clear['count']}"
+        ok(f"ResponseCache stats/clear_all 正确 (put 后 count={stats_after_put['count']}, clear 后 count=0)")
+    except AssertionError as e:
+        fail(f"ResponseCache stats/clear_all — {e}")
+    finally:
+        cache.clear_all()
+
+
+# ── 场景 20: 适配器 capabilities ───────────────────────────────
+
+def test_20_adapter_capabilities():
+    section("场景 20: 适配器 capabilities")
+
+    from code_cn_bridge.adapters import get_registry
+
+    required_keys = {
+        "tools", "streaming", "reasoning", "vision",
+        "image_gen", "video_gen", "code_execution", "max_tokens",
+    }
+
+    registry = get_registry()
+    adapter_names = registry.list()
+    assert len(adapter_names) > 0, "注册表应至少有一个适配器"
+
+    failures: list[str] = []
+    for name in adapter_names:
+        adapter = registry.get(name)
+        caps = getattr(adapter, "capabilities", None)
+        if not isinstance(caps, dict):
+            failures.append(f"{name}: capabilities 不是 dict")
+            continue
+        missing = required_keys - set(caps.keys())
+        if missing:
+            failures.append(f"{name}: 缺少键 {sorted(missing)}")
+            continue
+        # max_tokens 应为正整数
+        mt = caps.get("max_tokens")
+        if not isinstance(mt, int) or mt <= 0:
+            failures.append(f"{name}: max_tokens={mt} 不是正整数")
+        # 布尔字段类型检查
+        for bool_key in ("tools", "streaming", "reasoning", "vision",
+                         "image_gen", "video_gen", "code_execution"):
+            if not isinstance(caps.get(bool_key), bool):
+                failures.append(f"{name}: {bool_key}={caps.get(bool_key)} 不是 bool")
+
+    try:
+        assert not failures, "capabilities 校验失败:\n  " + "\n  ".join(failures)
+        ok(f"所有 {len(adapter_names)} 个适配器 capabilities 字段完整且类型正确 "
+           f"(adapters: {', '.join(sorted(adapter_names))})")
+    except AssertionError as e:
+        fail(f"适配器 capabilities — {e}")
+
+
 # ── 附加测试: 非流式响应转换 ───────────────────────────────────
 
-def test_11_response_translation():
+def test_21_response_translation():
     section("附加: 非流式 Chat → Responses 响应转换")
 
     from code_cn_bridge.protocol import translate_response
@@ -599,7 +946,7 @@ def test_11_response_translation():
 
 # ── 附加测试: reasoning_content 响应 ───────────────────────────
 
-def test_12_reasoning_response():
+def test_22_reasoning_response():
     section("附加: reasoning_content → reasoning 输出项")
 
     from code_cn_bridge.protocol import translate_response
@@ -767,8 +1114,18 @@ def main():
     test_08_stream_translation()
     test_09_truncation()
     test_10_tool_choice_precise()
-    test_11_response_translation()
-    test_12_reasoning_response()
+    test_11_metadata_passthrough()
+    test_12_parallel_tool_calls_passthrough()
+    test_13_store_field()
+    test_14_json_object_format()
+    test_15_reasoning_exclude()
+    test_16_stream_in_progress()
+    test_17_stream_incomplete()
+    test_18_response_cache_ttl()
+    test_19_response_cache_stats_clear()
+    test_20_adapter_capabilities()
+    test_21_response_translation()
+    test_22_reasoning_response()
 
     # ── 实时测试 ─────────────────────────────────────────────────
     if args.live:

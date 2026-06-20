@@ -18,6 +18,17 @@ class DoubaoAdapter(BaseAdapter):
     unsupported_features: set[str] = set()  # 豆包对 Chat API 支持完整
     supports_thinking_budget: bool = False  # 豆包仅支持 thinking 开关，不支持 budget_tokens
 
+    capabilities: dict[str, bool | int] = {
+        "tools": True,
+        "streaming": True,
+        "reasoning": True,
+        "vision": True,
+        "image_gen": False,
+        "video_gen": False,
+        "code_execution": False,
+        "max_tokens": 8192,
+    }
+
     def preprocess_image_gen_request(self, req: dict) -> dict:
         """DALL-E 兼容格式 + Seedream 扩展参数
 
