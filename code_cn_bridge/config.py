@@ -168,6 +168,12 @@ class Config:
             if p.is_file():
                 return p
             return None
+        # 检查环境变量 CODE_CN_BRIDGE_CONFIG（CLI -c 参数设置）
+        env_config = os.environ.get("CODE_CN_BRIDGE_CONFIG", "")
+        if env_config:
+            env_path = Path(env_config)
+            if env_path.is_file():
+                return env_path
         for p in DEFAULT_CONFIG_PATHS:
             if p.is_file():
                 return p
@@ -460,6 +466,20 @@ class Config:
                     if result:
                         return result
 
+        # 1c. gpt-5.x 系列智能回退：未知的 gpt-5.x 模型自动使用 gpt-5.2 的映射
+        if model_name.startswith("gpt-5"):
+            fallback_entry = self.model_mapping.get("gpt-5.2")
+            if isinstance(fallback_entry, list):
+                for item in fallback_entry:
+                    if item.get("enabled", True):
+                        result = _resolve_entry(item)
+                        if result:
+                            return result
+            elif isinstance(fallback_entry, dict) and fallback_entry.get("enabled", True):
+                result = _resolve_entry(fallback_entry)
+                if result:
+                    return result
+
         # 2. 模糊匹配 provider 名（仅启用且有 API key 的 provider）
         for pname, pinfo in self.providers.items():
             if pinfo.get("enabled", True) and self._has_api_key(pinfo) and pname in model_name.lower():
@@ -484,8 +504,7 @@ class Config:
                 continue
             if pname in target.lower():
                 return pname
-        enabled = self._enabled_providers()
-        return next(iter(enabled), None) if enabled else None
+        return None
 
     def _get_default_model(self, provider_name: str) -> str:
         """获取 provider 的默认模型名，取 mapping 中第一个匹配的（支持多模型列表）"""

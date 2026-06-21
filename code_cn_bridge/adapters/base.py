@@ -27,7 +27,6 @@ class BaseAdapter(ABC):
     unsupported_features: set[str] = set()
 
     # 适配器能力声明 —— 用于路由决策和能力发现
-    # 子类按需覆盖具体字段
     capabilities: dict[str, bool | int] = {
         "tools": True,
         "streaming": True,
@@ -41,9 +40,22 @@ class BaseAdapter(ABC):
 
     # 思维链推理能力声明
     # supports_thinking_budget: 是否支持 budget_tokens 参数
-    #   True (默认): thinking: {type: "enabled", budget_tokens: N}
+    #   True: thinking: {type: "enabled", budget_tokens: N}
     #   False: thinking: {type: "enabled"} (仅开关，不含 budget_tokens)
     supports_thinking_budget: bool = True
+
+    # thinking_mode: 控制思考模式的行为
+    #   "auto" — 默认开启 thinking，通过 max_tokens 兜底
+    #   "adaptive" — 自适应模式 (如 MiniMax M3)
+    #   "off" — 默认关闭 thinking (如混元 HY3)
+    #   "forced" — 强制开启，不可关闭 (如 Kimi K2.7 Code)
+    thinking_mode: str = "auto"
+
+    # thinking_effort 映射：统一 effort 到各厂商参数
+    # 子类覆盖此方法来实现厂商特定的 thinking 控制
+    def apply_thinking(self, chat_req: dict) -> dict:
+        """统一的 thinking 控制入口 — 各适配器可按需覆盖"""
+        return chat_req
 
     # ── 三个钩子方法 ─────────────────────────────────────────────
 

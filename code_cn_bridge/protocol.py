@@ -375,7 +375,10 @@ def translate_request(
     - text.format → response_format (结构化输出)
     - truncation → 消息自动截断
     """
-    messages = _map_input_to_messages(responses_body.get("input", []))
+    # 提前提取 tools 数组，供 _map_input_to_messages 在缓存恢复失败时
+    # 使用 tools 中的函数名来推断缺失的 function_call 定义
+    raw_tools = responses_body.get("tools", [])
+    messages = _map_input_to_messages(responses_body.get("input", []), raw_tools)
 
     # ── previous_response_id / conversation 上下文压缩 ──────────
     cached_summaries: list[str] = []
@@ -415,6 +418,12 @@ def translate_request(
         messages.insert(0, {"role": "system", "content": msg_content})
     elif cached_summaries:
         messages.insert(0, {"role": "system", "content": "\n\n".join(cached_summaries)})
+
+    # 确保至少有一条非 system 消息（部分上游 API 要求必须有 user/assistant 消息）
+    has_regular = any(m.get("role") in ("user", "assistant") for m in messages)
+    if not has_regular:
+        # 这是一个 warmup / 探测请求，添加占位 user 消息
+        messages.append({"role": "user", "content": "Hello"})
 
     chat_req: dict = {
         "model": target_model,
@@ -633,8 +642,13 @@ def _flatten_function_call_output(output_parts: list) -> str:
     return "\n".join(s for s in segments if s)
 
 
-def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
-    """将 Responses API 的 input 数组映射为 Chat 的 messages 数组"""
+def _map_input_to_messages(input_items: list[dict], tools: list[dict] | None = None) -> list[dict]:
+    """将 Responses API 的 input 数组映射为 Chat 的 messages 数组
+
+    Args:
+        input_items: Responses API 的 input 数组
+        tools: 工具定义列表，用于在缓存恢复失败时推断函数名
+    """
     messages = []
     pending_tool_calls: list[dict] = []  # 收集连续的 function_call
     pending_reasoning: str = ""  # 收集 reasoning 文本，附加到紧随的 assistant 消息
@@ -650,30 +664,34 @@ def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
         """
         return get_response_cache().find_tool_call(call_id)
 
-    def _ensure_tool_call_parent(call_id: str) -> None:
+    def _ensure_tool_call_parent(call_id: str) -> bool:
         """确保 tool 消息前有对应的 assistant(tool_calls) 消息
 
         处理续接对话时 function_call 项缺失的场景。
         如果 call_id 已在 pending_tool_calls 中或已在已知 ID 集合中，跳过。
         否则尝试从 ResponseCache 恢复缺失的 function_call 定义。
+
+        Returns:
+            True 如果找到了或成功恢复了 tool_call 定义
+            False 如果无法恢复（此时应跳过对应的 function_call_output）
         """
         nonlocal pending_reasoning
         if not call_id:
-            return
+            return True  # 无 call_id，不阻塞
         if call_id in known_tc_ids:
-            return
+            return True
         # 检查是否在 pending 中
         for tc in pending_tool_calls:
             if tc.get("id") == call_id:
                 known_tc_ids.add(call_id)
-                return
+                return True
         # 检查 messages 中是否已有包含此 call_id 的 assistant 消息
         for m in messages:
             if m.get("role") == "assistant":
                 for tc in (m.get("tool_calls") or []):
                     if tc.get("id") == call_id:
                         known_tc_ids.add(call_id)
-                        return
+                        return True
         # 尝试从 cache 恢复
         recovered = _recover_tool_call_from_cache(call_id)
         if recovered:
@@ -687,21 +705,38 @@ def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
             messages.append(msg)
             _logger.info("从缓存恢复了缺失的 assistant(tool_calls) 消息: call_id=%s name=%s",
                 call_id, recovered.get("function", {}).get("name", ""))
-            return
-        # 无法恢复，创建一个最小占位 assistant 消息（避免 400 错误）
-        known_tc_ids.add(call_id)
-        msg = {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [{
-                "type": "function",
-                "id": call_id,
-                "function": {"name": "unknown", "arguments": "{}"},
-            }],
-        }
-        msg["reasoning_content"] = "Tool calls."
-        messages.append(msg)
-        _logger.warning("无法从缓存恢复 tool_call=%s，使用占位 assistant 消息", call_id)
+            return True
+        # 无法恢复：尝试从 tools 数组中推断函数名
+        # 如果 tools 中只有一个函数，直接使用；否则使用第一个函数名（带警告）
+        # 避免因占位符导致上游 400 错误，同时尽可能保留对话上下文
+        if tools:
+            # 优先使用唯一函数名
+            if len(tools) == 1:
+                fn_name = tools[0].get("function", {}).get("name", "tool_call")
+            else:
+                fn_name = tools[0].get("function", {}).get("name", "tool_call")
+                _logger.warning(
+                    "无法确定 tool_call=%s 的函数名，从 tools 中推断为 %s（可能存在偏差）",
+                    call_id, fn_name,
+                )
+            known_tc_ids.add(call_id)
+            msg = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "type": "function",
+                    "id": call_id,
+                    "function": {"name": fn_name, "arguments": "{}"},
+                }],
+            }
+            msg["reasoning_content"] = "Previous tool call."
+            messages.append(msg)
+            _logger.info("从 tools 推断恢复了缺失的 assistant(tool_calls): call_id=%s name=%s",
+                call_id, fn_name)
+            return True
+        # 没有 tools 信息，也无法从缓存恢复，跳过该 function_call_output
+        _logger.warning("无法从缓存恢复 tool_call=%s 且无 tools 信息，跳过该 function_call_output", call_id)
+        return False
 
     def _flush_tool_calls(flush_all: bool = False):
         """提交收集中的 tool_calls，附带 reasoning_content
@@ -748,7 +783,10 @@ def _map_input_to_messages(input_items: list[dict]) -> list[dict]:
             call_id = item.get("call_id", "")
             responded_call_ids.add(call_id)
             # 确保有对应的 assistant(tool_calls) 消息（续接对话时可能缺失）
-            _ensure_tool_call_parent(call_id)
+            if not _ensure_tool_call_parent(call_id):
+                # 无法恢复 tool_call 定义，跳过该 function_call_output
+                # 避免创建无效占位导致上游 400 错误
+                continue
             # 并行工具调用合并：首次收到 tool 结果时，将所有收集中的
             # tool_calls 合并为一条 assistant 消息（codex-relay 做法）
             _flush_tool_calls(flush_all=True)
@@ -1361,13 +1399,25 @@ class StreamTranslator:
     # ── 入口 ─────────────────────────────────────────────────────
 
     def warmup(self) -> list[str]:
-        """响应预热: 立即发送 response.created 事件，不等上游响应
+        """响应预热: 立即发送 response.created 和 response.in_progress
 
-        ccx 风格: 在发起上游请求前先发送 HTTP 状态码和初始 SSE 事件，
-        减少 Codex 感知到的首字节延迟。
+        Codex 在收到 response.in_progress 之前会一直显示"正在思考"。
+        不等到上游首 chunk 才发 in_progress，让 Codex UI 立即进入活跃状态。
         """
         if not self._created_sent:
-            return self._emit_created()
+            events = self._emit_created()
+            # 立即发送 response.in_progress，不等上游首 chunk
+            self._in_progress_sent = True
+            events.append(
+                _sse_line({
+                    "type": "response.in_progress",
+                    "response": {
+                        "id": self.response_id,
+                        "status": "in_progress",
+                    },
+                })
+            )
+            return events
         return []
 
     async def translate_stream(

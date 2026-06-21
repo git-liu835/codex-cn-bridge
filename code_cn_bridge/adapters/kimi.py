@@ -1,4 +1,16 @@
-"""Moonshot (Kimi) 适配器"""
+"""Moonshot (Kimi) 适配器 —— 支持 K2.7-Code / K2.6 / K2.5
+
+Kimi K2.7-Code (2026-06-12):
+  - 1T total MoE, 32B active, 384 experts
+  - 上下文: 262K tokens
+  - thinking: FORCED ON — 无法关闭
+  - 发送 thinking: {type: "disabled"} 会被 API 拒绝
+  - 不支持 budget_tokens
+
+Kimi K2.6 / K2.5:
+  - thinking 可开关: thinking: {type: "enabled"|"disabled"}
+  - preserve_thinking: true 跨多轮保留推理内容
+"""
 
 from __future__ import annotations
 
@@ -13,7 +25,8 @@ class KimiAdapter(BaseAdapter):
     base_url = "https://api.moonshot.cn/v1"
     api_key_env = "KIMI_API_KEY"
     unsupported_features: set[str] = set()
-    supports_thinking_budget: bool = False  # Kimi 仅支持 thinking 开关，不支持 budget_tokens
+    supports_thinking_budget: bool = False  # Kimi 不支持 budget_tokens
+    thinking_mode: str = "forced"  # K2.7 Code 强制开启
 
     capabilities: dict[str, bool | int] = {
         "tools": True,
@@ -26,38 +39,53 @@ class KimiAdapter(BaseAdapter):
         "max_tokens": 8192,
     }
 
+    def apply_thinking(self, chat_req: dict) -> dict:
+        """Kimi K2.7 Code: thinking 强制开启, API 拒绝 disabled
+
+        effort 映射 (仅影响 max_tokens 兜底值, 不影响 thinking 状态):
+          low    → max_tokens: budget + 12288
+          medium → max_tokens: budget + 20480
+          high   → max_tokens: budget + 36864
+        """
+        if "_disable_thinking" in chat_req:
+            chat_req.pop("_disable_thinking")
+            chat_req.pop("_thinking_budget", None)
+            # K2.7 Code 不能发送 disabled, 但仍可控制 max_tokens
+            if "thinking" not in chat_req:
+                chat_req["thinking"] = {"type": "enabled"}
+            cur_max = chat_req.get("max_tokens", 0)
+            if not cur_max or cur_max < 12288:
+                chat_req["max_tokens"] = 12288
+            return chat_req
+
+        budget = chat_req.pop("_thinking_budget", 4096)
+
+        if "thinking" not in chat_req:
+            chat_req["thinking"] = {"type": "enabled"}
+
+        # 多轮保留推理上下文
+        if "preserve_thinking" not in chat_req:
+            chat_req["preserve_thinking"] = True
+
+        cur_max = chat_req.get("max_tokens", 0)
+        min_max = budget + 16384
+        if cur_max and cur_max < min_max:
+            chat_req["max_tokens"] = min_max
+        elif not cur_max:
+            chat_req["max_tokens"] = min_max
+
+        return chat_req
+
     def preprocess_chat_request(self, chat_req: dict) -> dict:
-        # Kimi 不支持 logprobs 和 logit_bias
         chat_req.pop("logprobs", None)
         chat_req.pop("logit_bias", None)
         chat_req.pop("user", None)
 
-        # Kimi k2.x 默认启用 thinking，利用模型推理能力
-        # reasoning_content 会被 StreamTranslator 转换为 reasoning 输出项
-        # 历史消息中缺失 reasoning_content 的情况由 _flush_tool_calls 兜底处理
-        # 可通过 model_mapping 中 enable_thinking: false 按模型关闭
-        # budget_tokens 限制推理 token 数，防止模型耗尽所有 token 在推理上
-        if "_disable_thinking" in chat_req:
-            chat_req.pop("_disable_thinking")
-            if "thinking" not in chat_req:
-                chat_req["thinking"] = {"type": "disabled"}
-        elif "thinking" not in chat_req:
-            if self.supports_thinking_budget:
-                budget = chat_req.pop("_thinking_budget", 4096)
-                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            else:
-                chat_req.pop("_thinking_budget", None)
-                chat_req["thinking"] = {"type": "enabled"}
-                # 确保 max_tokens 足够容纳 thinking + 实际输出
-                cur_max = chat_req.get("max_tokens", 0)
-                if not cur_max or cur_max < 16384:
-                    chat_req["max_tokens"] = 16384
+        chat_req = self.apply_thinking(chat_req)
 
-        # 老版本 Kimi 不支持 function calling
         tools = chat_req.get("tools")
         if tools:
             if not self.supports_tool_calls():
-                # 降级处理：将工具定义注入 system prompt
                 chat_req.pop("tools", None)
                 chat_req.pop("tool_choice", None)
                 chat_req = self._inject_tools_as_prompt(chat_req)
@@ -65,20 +93,17 @@ class KimiAdapter(BaseAdapter):
         return chat_req
 
     def postprocess_chat_response(self, chat_resp: dict) -> dict:
-        """处理 Kimi 非流式响应"""
         choices = chat_resp.get("choices", [])
         for choice in choices:
             msg = choice.get("message", {})
             content = msg.get("content", "")
 
-            # Kimi 旧版可能以 XML/JSON 格式返回 tool_calls
             if content and isinstance(content, str) and not msg.get("tool_calls"):
                 extracted = self.extract_tool_calls_from_content(content)
                 if extracted:
                     msg["tool_calls"] = extracted
                     msg["content"] = None
 
-            # 确保 tool_calls 结构正确
             tool_calls = msg.get("tool_calls") or []
             for tc in tool_calls:
                 if "type" not in tc:
@@ -90,7 +115,6 @@ class KimiAdapter(BaseAdapter):
         return chat_resp
 
     def stream_event_transform(self, raw_event: dict) -> dict:
-        """Kimi SSE 格式标准化"""
         for choice in raw_event.get("choices", []):
             delta = choice.get("delta", {})
             tool_calls = delta.get("tool_calls", [])
@@ -103,15 +127,12 @@ class KimiAdapter(BaseAdapter):
         return raw_event
 
     def supports_tool_calls(self) -> bool:
-        """Kimi 新版支持 function calling，可通过配置控制"""
         return True
 
     def extract_tool_calls_from_content(self, content: str) -> list[dict] | None:
-        """从 Kimi 旧版响应中提取 tool_calls"""
         if not content:
             return None
 
-        # Kimi 旧版可能使用 <function_call> 或 JSON 格式
         patterns = [
             r"<function_call>\s*(.*?)\s*</function_call>",
             r'```json\s*(\{.*?"name".*?\})\s*```',
@@ -144,7 +165,6 @@ class KimiAdapter(BaseAdapter):
         return None
 
     def _inject_tools_as_prompt(self, chat_req: dict) -> dict:
-        """将 tool 定义注入为 system prompt 中的指令（降级策略）"""
         tools = chat_req.get("tools", [])
         if not tools:
             return chat_req

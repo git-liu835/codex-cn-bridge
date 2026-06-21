@@ -1,7 +1,13 @@
-"""腾讯混元 (Hunyuan) 适配器 —— 兼容 OpenAI Chat Completions API
+"""腾讯混元 (Hunyuan) 适配器 —— 支持 HY3-Preview 旗舰模型
 
-文档：https://cloud.tencent.com/document/product/1729
-接口：POST https://api.hunyuan.cloud.tencent.com/v1/chat/completions
+HY3-Preview (2026-05):
+  - 276B MoE, ~20B active
+  - 上下文: 1M (SiliconFlow), 128K+ (Tencent Cloud)
+  - thinking: 默认 OFF (reasoning_effort: "none") — 最安全的默认值
+  - 控制: reasoning_effort: "high" | "medium" | "low" | "none"
+  - 不支持 budget_tokens
+
+旧模型 (hunyuan-t1-latest, hunyuan-2.0-thinking) 将于 2026-06-26 下线。
 """
 
 from __future__ import annotations
@@ -15,8 +21,9 @@ class HunyuanAdapter(BaseAdapter):
     name = "hunyuan"
     base_url = "https://api.hunyuan.cloud.tencent.com/v1"
     api_key_env = "HUNYUAN_API_KEY"
-    unsupported_features: set[str] = set()  # 混元对 Chat API 支持完整
-    supports_thinking_budget: bool = False  # 混元仅支持 thinking 开关，不支持 budget_tokens
+    unsupported_features: set[str] = set()
+    supports_thinking_budget: bool = False  # 混元不支持 budget_tokens
+    thinking_mode: str = "off"  # HY3 默认不思考, 最安全
 
     capabilities: dict[str, bool | int] = {
         "tools": True,
@@ -29,36 +36,49 @@ class HunyuanAdapter(BaseAdapter):
         "max_tokens": 8192,
     }
 
+    def apply_thinking(self, chat_req: dict) -> dict:
+        """混元 HY3 thinking 控制 → reasoning_effort
+
+        HY3 默认 reasoning_effort: "none" (关闭思考),
+        只有显式请求时才开启。
+        """
+        if "_disable_thinking" in chat_req:
+            chat_req.pop("_disable_thinking")
+            chat_req.pop("_thinking_budget", None)
+            if "reasoning_effort" not in chat_req:
+                chat_req["reasoning_effort"] = "none"
+            return chat_req
+
+        budget = chat_req.pop("_thinking_budget", 4096)
+
+        if "reasoning_effort" not in chat_req:
+            if budget <= 2048:
+                chat_req["reasoning_effort"] = "none"
+            elif budget <= 8192:
+                chat_req["reasoning_effort"] = "medium"
+            else:
+                chat_req["reasoning_effort"] = "high"
+
+        cur_max = chat_req.get("max_tokens", 0)
+        min_max = budget + 12288
+        if cur_max and cur_max < min_max:
+            chat_req["max_tokens"] = min_max
+        elif not cur_max:
+            chat_req["max_tokens"] = min_max
+
+        return chat_req
+
     def preprocess_chat_request(self, chat_req: dict) -> dict:
-        # 移除混元不支持的字段
         chat_req.pop("logprobs", None)
         chat_req.pop("logit_bias", None)
         chat_req.pop("user", None)
 
-        # stop 限制
         stop = chat_req.get("stop")
         if isinstance(stop, list) and len(stop) > 4:
             chat_req["stop"] = stop[:4]
 
-        # 混元支持 thinking 开关，可通过 model_mapping 中 enable_thinking: false 按模型关闭
-        if "_disable_thinking" in chat_req:
-            chat_req.pop("_disable_thinking")
-            chat_req.pop("_thinking_budget", None)
-            if "thinking" not in chat_req:
-                chat_req["thinking"] = {"type": "disabled"}
-        elif "thinking" not in chat_req:
-            if self.supports_thinking_budget:
-                budget = chat_req.pop("_thinking_budget", 4096)
-                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            else:
-                chat_req.pop("_thinking_budget", None)
-                chat_req["thinking"] = {"type": "enabled"}
-                # 确保 max_tokens 足够容纳 thinking + 实际输出
-                cur_max = chat_req.get("max_tokens", 0)
-                if not cur_max or cur_max < 16384:
-                    chat_req["max_tokens"] = 16384
+        chat_req = self.apply_thinking(chat_req)
 
-        # 工具格式规范化
         tools = chat_req.get("tools")
         if tools:
             for tool in tools:
@@ -80,7 +100,6 @@ class HunyuanAdapter(BaseAdapter):
         return chat_req
 
     def postprocess_chat_response(self, chat_resp: dict) -> dict:
-        """处理混元非流式响应"""
         choices = chat_resp.get("choices", [])
         for choice in choices:
             msg = choice.get("message", {})
@@ -94,7 +113,6 @@ class HunyuanAdapter(BaseAdapter):
         return chat_resp
 
     def stream_event_transform(self, raw_event: dict) -> dict:
-        """混元 SSE 格式标准化"""
         for choice in raw_event.get("choices", []):
             delta = choice.get("delta", {})
             tool_calls = delta.get("tool_calls", [])

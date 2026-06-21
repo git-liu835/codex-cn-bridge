@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -1335,6 +1335,174 @@ def create_app(verbose: bool = False) -> FastAPI:
             logger.exception("视频生成请求异常")
             return JSONResponse({"error": {"message": str(exc)}}, 500)
 
+    async def _ws_send_sse_as_json(websocket: WebSocket, event_line: str) -> None:
+        """将 SSE 格式的事件行 (data: {...}\n\n) 转换为 JSON 并通过 WebSocket 发送
+
+        WebSocket 协议要求发送纯 JSON 对象，而非 SSE 格式文本。
+        HTTP 流式传输使用 SSE 格式 (data: {...}\n\n)，但 WebSocket 应发送 {...}。
+        """
+        if not event_line or not event_line.startswith("data: "):
+            return
+        # 提取 JSON 部分: "data: {...}\n\n" → "{...}"
+        json_str = event_line[6:].rstrip("\n")
+        if not json_str:
+            return
+        try:
+            data = json.loads(json_str)
+            await websocket.send_json(data)
+        except json.JSONDecodeError:
+            logger.warning("WebSocket SSE 解析失败: %s", event_line[:100])
+
+    @app.websocket("/v1/responses")
+    async def responses_websocket(websocket: WebSocket):
+        """WebSocket 端点: 接受 Codex 的 WebSocket 升级请求，保持长连接并处理多次请求"""
+        await websocket.accept()
+        logger.info("WebSocket 连接已建立")
+        try:
+            while True:
+                try:
+                    raw = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    # 60秒内无消息，发送心跳保持连接
+                    try:
+                        await websocket.send_json({"type": "heartbeat"})
+                    except Exception:
+                        break
+                    continue
+                except WebSocketDisconnect:
+                    logger.info("WebSocket 客户端断开")
+                    break
+
+                start_time = time.time()
+                try:
+                    body = json.loads(raw)
+                except Exception:
+                    await websocket.send_json(build_error_response("无效的 JSON 请求体"))
+                    continue
+
+                model = body.get("model", "unknown")
+                stream = body.get("stream", False)
+
+                # 会话粘性
+                conv_id = _extract_conversation_id(body)
+                affinity_provider = get_affinity(conv_id) if conv_id else None
+
+                try:
+                    if affinity_provider:
+                        try:
+                            adapter, provider_name, target_model, api_keys = _resolve_adapter(affinity_provider, body.get("model", model))
+                        except ValueError:
+                            affinity_provider = None
+                            adapter, provider_name, target_model, api_keys = _route_vision(model, body)
+                    else:
+                        adapter, provider_name, target_model, api_keys = _route_vision(model, body)
+
+                    if conv_id and not affinity_provider:
+                        set_affinity(conv_id, provider_name)
+                except ValueError as exc:
+                    await websocket.send_json(build_error_response(str(exc)))
+                    continue
+
+                # 熔断器检查
+                circuit_breaker = get_circuit_breaker_registry().get(provider_name)
+                if not circuit_breaker.before_request():
+                    await websocket.send_json(build_error_response(
+                        f"Provider '{provider_name}' 已熔断", "circuit_open", 503))
+                    continue
+
+                provider_timeout = get_config().get_provider(provider_name).get("timeout", 120) if provider_name else 120
+                client = UpstreamClient(adapter, api_keys, timeout=provider_timeout, stream_timeout=max(provider_timeout, 600))
+
+                try:
+                    cfg = get_config()
+                    model_entry = cfg.model_mapping.get(model)
+                    if isinstance(model_entry, list):
+                        model_item = next((e for e in model_entry if e.get("enabled")), model_entry[0] if model_entry else None)
+                    else:
+                        model_item = model_entry
+                    if model_item is not None:
+                        if not model_item.get("enable_thinking", True):
+                            body["_disable_thinking"] = True
+                        if "thinking_budget" in model_item:
+                            budget = model_item["thinking_budget"]
+                            other_count = sum(1 for item in body.get("input", []) if item.get("role") != "system")
+                            if other_count > 25:
+                                budget = min(budget, 4096)
+                            elif other_count > 15:
+                                budget = min(budget, 8192)
+                            body["_thinking_budget"] = budget
+
+                    builtin_flags = _intercept_builtin_tools(body)
+                    chat_req = translate_request(body, adapter, target_model, alias=model)
+                    has_image_gen = chat_req.pop("_has_image_gen", False)
+
+                    if has_image_gen or builtin_flags.get("has_video_gen"):
+                        await websocket.send_json(build_error_response("WebSocket 不支持图片/视频生成，请使用 HTTP POST"))
+                        continue
+
+                    chat_req.setdefault("_store", body.get("store", True))
+
+                    if stream:
+                        # WebSocket 流式：必须用 StreamTranslator 把上游 Chat SSE 翻译为
+                        # Responses API 的事件格式，然后以 JSON 格式发给 Codex
+                        # 注意：WebSocket 发送的是纯 JSON 对象，不是 SSE 格式 (data: {...}\n\n)
+                        translator = StreamTranslator(model=target_model, chat_req=chat_req)
+                        # 预热：发送 response.created + response.in_progress
+                        for event_line in translator.warmup():
+                            await _ws_send_sse_as_json(websocket, event_line)
+                        async for chunk in client.chat_completion_stream(chat_req):
+                            chunk = adapter.stream_event_transform(chunk)
+                            for event_line in translator.translate_chunk(chunk):
+                                await _ws_send_sse_as_json(websocket, event_line)
+                        # 结束时发送 response.completed + 终止符
+                        for event_line in translator._finish():
+                            await _ws_send_sse_as_json(websocket, event_line)
+                        if chat_req.get("_store", True):
+                            get_response_cache().put(translator.response_id, {
+                                "id": translator.response_id,
+                                "model": model,
+                                "output": translator._output_items,
+                            })
+                        # 缓存 reasoning_content 供下一轮恢复
+                        reasoning_text = "".join(translator._reasoning_buf)
+                        if reasoning_text:
+                            save_last_reasoning(reasoning_text)
+                        circuit_breaker.on_success()
+                        _record_request(start_time, model, "responses_ws", 200, True, "",
+                            provider=provider_name, target_model=target_model)
+                    else:
+                        chat_resp = await client.chat_completion(chat_req)
+                        responses_resp = translate_response(chat_resp, adapter, target_model, chat_req=chat_req)
+                        if builtin_flags.get("has_code_interpreter"):
+                            responses_resp = _process_code_interpreter_response(responses_resp, model)
+                        resp_id = responses_resp.get("id", "")
+                        if resp_id and chat_req.get("_store", True):
+                            get_response_cache().put(resp_id, responses_resp)
+                        tokens = chat_resp.get("usage", {}).get("total_tokens", 0)
+                        _record_request(start_time, model, "responses_ws", 200, False, "", tokens,
+                            provider=provider_name, target_model=target_model)
+                        circuit_breaker.on_success()
+                        await websocket.send_json(responses_resp)
+
+                except Exception as exc:
+                    logger.exception("WebSocket 请求处理异常")
+                    circuit_breaker.on_failure()
+                    _record_request(start_time, model, "responses_ws", 500, stream, str(exc),
+                        provider=provider_name, target_model=target_model)
+                    try:
+                        await websocket.send_json(build_error_response(str(exc)))
+                    except Exception:
+                        pass
+                finally:
+                    await client.close()
+        except Exception:
+            logger.debug("WebSocket 连接关闭")
+        finally:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
     return app
 
 
@@ -1425,6 +1593,7 @@ async def _handle_stream(
                 yield event_line
             chunk_count = 0
             first_chunk_time = 0.0
+            retry_count = 1  # 防止重复进入空洞重试分支
 
         chat_stream = client.chat_completion_stream(chat_req)
         stream_error = ""
@@ -1476,7 +1645,7 @@ async def _handle_stream(
             #   3. 敷衍短输出 (content < 50 字符, tools=空)
             content_text = "".join(translator._accumulated_text).strip()
             has_tool_calls = bool(translator._tc_buf)
-            has_useful_content = len(content_text) >= 50
+            has_useful_content = len(content_text) >= 10  # 降低阈值，短回复也算有效
 
             is_empty_response = not has_tool_calls and not has_useful_content
 

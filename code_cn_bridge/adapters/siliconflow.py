@@ -1,9 +1,12 @@
-"""硅基流动 (SiliconFlow) 适配器 —— 完全兼容 OpenAI Chat Completions API
+"""硅基流动 (SiliconFlow) 适配器 —— 聚合推理平台
 
-文档：https://docs.siliconflow.cn/
-接口：POST https://api.siliconflow.cn/v1/chat/completions
+SiliconFlow 聚合多家模型 (DeepSeek V4, Qwen3, GLM-5, HY3 等),
+通过统一 OpenAI 兼容协议对外提供。
 
-硅基流动聚合多家模型（DeepSeek、Qwen、GLM 等），通过统一 OpenAI 兼容协议对外提供。
+thinking 控制约定 (与各原生厂商不同):
+  - 使用 enable_thinking: true/false (不是 thinking object)
+  - Qwen3 支持 thinking_budget 参数
+  - DeepSeek V4+ 支持 reasoning_effort: "think_max" | "think_high" | "non_think"
 """
 
 from __future__ import annotations
@@ -17,8 +20,9 @@ class SiliconFlowAdapter(BaseAdapter):
     name = "siliconflow"
     base_url = "https://api.siliconflow.cn/v1"
     api_key_env = "SILICONFLOW_API_KEY"
-    unsupported_features: set[str] = set()  # 硅基流动完全兼容 OpenAI Chat API
-    supports_thinking_budget: bool = False  # 仅支持 thinking 开关，不支持 budget_tokens
+    unsupported_features: set[str] = set()
+    supports_thinking_budget: bool = True  # SF 支持 enable_thinking + thinking_budget
+    thinking_mode: str = "auto"
 
     capabilities: dict[str, bool | int] = {
         "tools": True,
@@ -31,36 +35,48 @@ class SiliconFlowAdapter(BaseAdapter):
         "max_tokens": 8192,
     }
 
+    def apply_thinking(self, chat_req: dict) -> dict:
+        """SiliconFlow 统一的 thinking 控制
+
+        与原生厂商不同, SF 使用 enable_thinking + thinking_budget。
+        """
+        if "_disable_thinking" in chat_req:
+            chat_req.pop("_disable_thinking")
+            chat_req.pop("_thinking_budget", None)
+            chat_req["enable_thinking"] = False
+            return chat_req
+
+        budget = chat_req.pop("_thinking_budget", 4096)
+
+        if "enable_thinking" not in chat_req:
+            if budget <= 2048:
+                chat_req["enable_thinking"] = False
+            else:
+                chat_req["enable_thinking"] = True
+
+        if "thinking_budget" not in chat_req and chat_req.get("enable_thinking"):
+            chat_req["thinking_budget"] = budget
+
+        cur_max = chat_req.get("max_tokens", 0)
+        min_max = budget + 12288
+        if cur_max and cur_max < min_max:
+            chat_req["max_tokens"] = min_max
+        elif not cur_max:
+            chat_req["max_tokens"] = min_max
+
+        return chat_req
+
     def preprocess_chat_request(self, chat_req: dict) -> dict:
-        # 移除硅基流动不支持的字段
         chat_req.pop("logprobs", None)
         chat_req.pop("logit_bias", None)
         chat_req.pop("user", None)
 
-        # stop 限制
         stop = chat_req.get("stop")
         if isinstance(stop, list) and len(stop) > 4:
             chat_req["stop"] = stop[:4]
 
-        # 硅基流动支持 thinking 开关，可通过 model_mapping 中 enable_thinking: false 按模型关闭
-        if "_disable_thinking" in chat_req:
-            chat_req.pop("_disable_thinking")
-            chat_req.pop("_thinking_budget", None)
-            if "thinking" not in chat_req:
-                chat_req["thinking"] = {"type": "disabled"}
-        elif "thinking" not in chat_req:
-            if self.supports_thinking_budget:
-                budget = chat_req.pop("_thinking_budget", 4096)
-                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            else:
-                chat_req.pop("_thinking_budget", None)
-                chat_req["thinking"] = {"type": "enabled"}
-                # 确保 max_tokens 足够容纳 thinking + 实际输出
-                cur_max = chat_req.get("max_tokens", 0)
-                if not cur_max or cur_max < 16384:
-                    chat_req["max_tokens"] = 16384
+        chat_req = self.apply_thinking(chat_req)
 
-        # 工具格式规范化
         tools = chat_req.get("tools")
         if tools:
             for tool in tools:
@@ -82,7 +98,6 @@ class SiliconFlowAdapter(BaseAdapter):
         return chat_req
 
     def postprocess_chat_response(self, chat_resp: dict) -> dict:
-        """处理硅基流动非流式响应"""
         choices = chat_resp.get("choices", [])
         for choice in choices:
             msg = choice.get("message", {})
@@ -96,7 +111,6 @@ class SiliconFlowAdapter(BaseAdapter):
         return chat_resp
 
     def stream_event_transform(self, raw_event: dict) -> dict:
-        """硅基流动 SSE 格式标准化"""
         for choice in raw_event.get("choices", []):
             delta = choice.get("delta", {})
             tool_calls = delta.get("tool_calls", [])

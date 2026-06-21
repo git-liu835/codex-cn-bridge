@@ -22,9 +22,14 @@ env/
 *.swp
 *.swo
 
+# Config with API keys (use config.example.yaml as template)
+config.yaml
+
 # Bridge logs
 bridge.log
 bridge.log.*
+_bridge_err.log
+_bridge_out.log
 
 # Desktop app
 desktop/dist/
@@ -70,3 +75,5 @@ CLAUDE.md
 _verify_features.py
 _verify*.py
 _test_*.py
+_dump_config.py
+check_cc.py

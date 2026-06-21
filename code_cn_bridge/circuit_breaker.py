@@ -126,15 +126,21 @@ class CircuitBreaker:
                         self.name, error_rate * 100, failures, total,
                     )
                     return False
-                # 主动探测不健康也触发熔断
-                if self._probe_healthy is False and now - self._last_probe_time < self.cooldown_seconds:
+                # 主动探测不健康: 降低健康评分但不立即熔断
+                # 仅当滑动窗口内也有实际请求失败时才触发熔断
+                if self._probe_healthy is False and total >= self.min_requests and error_rate >= self.error_rate_threshold:
                     self.state = CircuitState.OPEN
                     self.last_failure_time = now
                     logger.warning(
-                        "熔断器 %s: CLOSED → OPEN (主动探测失败)",
-                        self.name,
+                        "熔断器 %s: CLOSED → OPEN (主动探测失败 + 滑动窗口错误率 %.1f%%, %d/%d 失败)",
+                        self.name, error_rate * 100, failures, total,
                     )
                     return False
+                if self._probe_healthy is False:
+                    logger.debug(
+                        "熔断器 %s: 主动探测失败，但滑动窗口内请求不足，暂不熔断 (健康评分 %d)",
+                        self.name, self.health_score,
+                    )
                 return True
 
             if self.state == CircuitState.OPEN:

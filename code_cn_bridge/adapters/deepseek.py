@@ -1,4 +1,16 @@
-"""DeepSeek 适配器"""
+"""DeepSeek 适配器 —— 支持 V4-Pro / V4-Flash (2026-04)
+
+DeepSeek V4-Pro:
+  - 1.6T MoE, 49B active
+  - 上下文: 1M tokens, max_output: 384K
+  - thinking 三模式: non-thinking, thinking (Think High), thinking_max (Think Max)
+  - 通过 thinking_mode 参数控制, 不支持 budget_tokens
+  - Anthropic 兼容端点支持 thinking.budget_tokens, 主流端点不支持
+
+DeepSeek V4-Flash:
+  - 284B MoE, 13B active
+  - 同样支持 thinking 三模式
+"""
 
 from __future__ import annotations
 
@@ -11,7 +23,9 @@ class DeepSeekAdapter(BaseAdapter):
     name = "deepseek"
     base_url = "https://api.deepseek.com"
     api_key_env = "DEEPSEEK_API_KEY"
-    unsupported_features: set[str] = set()  # DeepSeek 对 Chat API 支持完整
+    unsupported_features: set[str] = set()
+    supports_thinking_budget: bool = False  # DeepSeek 主流端点不支持 budget_tokens
+    thinking_mode: str = "auto"
 
     capabilities: dict[str, bool | int] = {
         "tools": True,
@@ -24,43 +38,55 @@ class DeepSeekAdapter(BaseAdapter):
         "max_tokens": 8192,
     }
 
+    def apply_thinking(self, chat_req: dict) -> dict:
+        """DeepSeek V4+ thinking 控制 → thinking_mode 参数
+
+        effort 映射:
+          low    → thinking_mode: "non-thinking"
+          medium → thinking_mode: "thinking"       (Think High)
+          high   → thinking_mode: "thinking_max"   (Think Max)
+        """
+        if "_disable_thinking" in chat_req:
+            chat_req.pop("_disable_thinking")
+            chat_req.pop("_thinking_budget", None)
+            if "thinking_mode" not in chat_req:
+                chat_req["thinking_mode"] = "non-thinking"
+            return chat_req
+
+        budget = chat_req.pop("_thinking_budget", 4096)
+
+        if "thinking_mode" in chat_req:
+            return chat_req
+
+        # budget → effort → thinking_mode
+        if budget <= 2048:
+            chat_req["thinking_mode"] = "non-thinking"
+        elif budget <= 16384:
+            chat_req["thinking_mode"] = "thinking"
+        else:
+            chat_req["thinking_mode"] = "thinking_max"
+
+        # 关键: max_tokens 兜底, thinking_max 可耗尽 384K
+        cur_max = chat_req.get("max_tokens", 0)
+        min_max = budget + 16384
+        if cur_max and cur_max < min_max:
+            chat_req["max_tokens"] = min_max
+        elif not cur_max:
+            chat_req["max_tokens"] = min_max
+
+        return chat_req
+
     def preprocess_chat_request(self, chat_req: dict) -> dict:
-        # DeepSeek 不支持 logprobs
         chat_req.pop("logprobs", None)
         chat_req.pop("logit_bias", None)
         chat_req.pop("user", None)
 
-        # stop 只支持单个字符串或字符串列表，DeepSeek 支持列表
         stop = chat_req.get("stop")
         if isinstance(stop, list) and len(stop) > 4:
             chat_req["stop"] = stop[:4]
 
-        # 启用 thinking 模式，利用模型的推理能力
-        # reasoning_content 会被 StreamTranslator 转换为 reasoning 输出项，
-        # 不再转发为常规 content，因此不会导致推理循环
-        # 可通过 model_mapping 中 enable_thinking: false 按模型关闭
-        # budget_tokens 限制推理 token 数，防止模型耗尽所有 token 在推理上
-        if "_disable_thinking" in chat_req:
-            chat_req.pop("_disable_thinking")
-            if "thinking" not in chat_req:
-                chat_req["thinking"] = {"type": "disabled"}
-        elif "thinking" not in chat_req:
-            if self.supports_thinking_budget:
-                budget = chat_req.pop("_thinking_budget", 4096)
-                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
-                # 确保 max_tokens 足够容纳 thinking + 实际输出，否则模型可能只思考不输出
-                # thinking_budget=8192 时 max_tokens 至少 24576（留 16384 给正文）
-                cur_max = chat_req.get("max_tokens", 0)
-                min_max = budget + 16384
-                if cur_max and cur_max < min_max:
-                    chat_req["max_tokens"] = min_max
-                elif not cur_max:
-                    chat_req["max_tokens"] = min_max
-            else:
-                chat_req.pop("_thinking_budget", None)
-                chat_req["thinking"] = {"type": "enabled"}
+        chat_req = self.apply_thinking(chat_req)
 
-        # DeepSeek 对 tool 格式有要求，确保 function 字段存在
         tools = chat_req.get("tools")
         if tools:
             for tool in tools:
@@ -72,7 +98,6 @@ class DeepSeekAdapter(BaseAdapter):
                     }
                 if "type" not in tool:
                     tool["type"] = "function"
-                # 修复 parameters: 必须是 type: "object" 的 JSON Schema
                 params = tool.get("function", {}).get("parameters")
                 if not params or not isinstance(params, dict):
                     tool.setdefault("function", {})["parameters"] = {"type": "object", "properties": {}}
@@ -83,7 +108,6 @@ class DeepSeekAdapter(BaseAdapter):
         return chat_req
 
     def postprocess_chat_response(self, chat_resp: dict) -> dict:
-        """处理 DeepSeek 非流式响应"""
         choices = chat_resp.get("choices", [])
         for choice in choices:
             msg = choice.get("message", {})
@@ -98,7 +122,6 @@ class DeepSeekAdapter(BaseAdapter):
         return chat_resp
 
     def stream_event_transform(self, raw_event: dict) -> dict:
-        """DeepSeek SSE 格式基本标准，做微调"""
         for choice in raw_event.get("choices", []):
             delta = choice.get("delta", {})
             tool_calls = delta.get("tool_calls", [])
@@ -112,4 +135,4 @@ class DeepSeekAdapter(BaseAdapter):
         return raw_event
 
     def extract_tool_calls_from_content(self, content: str) -> list[dict] | None:
-        return None  # DeepSeek 原生支持 tool_calls，无需提取
+        return None

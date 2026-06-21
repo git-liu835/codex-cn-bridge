@@ -1,4 +1,13 @@
-"""智谱 GLM 适配器 —— 支持 GLM-5.1 / GLM-5V-Turbo / GLM-4.7-Flash 等"""
+"""智谱 GLM 适配器 —— 支持 GLM-5.2 / GLM-5.1 / GLM-5 / GLM-4.7 等
+
+GLM-5.2 (2026-06):
+  - 744B MoE, ~40B active per token
+  - 上下文: 200K tokens
+  - max_output: 128K tokens
+  - thinking: enabled by default, 通过 reasoning_effort 控制深度
+  - reasoning_effort: "max" (default), "high", "none" (相当于 disabled)
+  - 不支持 budget_tokens
+"""
 
 from __future__ import annotations
 
@@ -11,8 +20,9 @@ class GlmAdapter(BaseAdapter):
     name = "zhipu"
     base_url = "https://open.bigmodel.cn/api/paas/v4"
     api_key_env = "ZHIPU_API_KEY"
-    unsupported_features: set[str] = set()  # GLM 对 Chat API 支持完整
-    supports_thinking_budget: bool = False  # GLM 仅支持 thinking 开关，不支持 budget_tokens
+    unsupported_features: set[str] = set()
+    supports_thinking_budget: bool = False  # GLM 不支持 budget_tokens
+    thinking_mode: str = "auto"
 
     capabilities: dict[str, bool | int] = {
         "tools": True,
@@ -25,35 +35,57 @@ class GlmAdapter(BaseAdapter):
         "max_tokens": 8192,
     }
 
+    def apply_thinking(self, chat_req: dict) -> dict:
+        """GLM-5.x thinking 控制 —— 映射 effort 到 reasoning_effort
+
+        Codex Responses API reasoning.effort:
+          low    → reasoning_effort: "none"    (关闭思考，秒回)
+          medium → reasoning_effort: "high"    (适度思考)
+          high   → reasoning_effort: "max"     (深度思考，默认)
+
+        _disable_thinking → reasoning_effort: "none"
+        """
+        if "_disable_thinking" in chat_req:
+            chat_req.pop("_disable_thinking")
+            chat_req.pop("_thinking_budget", None)
+            if "reasoning_effort" not in chat_req:
+                chat_req["reasoning_effort"] = "none"
+            return chat_req
+
+        budget = chat_req.pop("_thinking_budget", 4096)
+
+        # 已显式设置 reasoning_effort → 保留
+        if "reasoning_effort" in chat_req:
+            return chat_req
+
+        # 通过 budget 推断 effort 级别
+        if budget <= 2048:
+            chat_req["reasoning_effort"] = "none"
+        elif budget <= 8192:
+            chat_req["reasoning_effort"] = "high"
+        else:
+            chat_req["reasoning_effort"] = "max"
+
+        # 关键保护: 强制设置 max_tokens 兜底，防止无限思考
+        cur_max = chat_req.get("max_tokens", 0)
+        min_max = budget + 12288  # thinking budget + 正文空间
+        if cur_max and cur_max < min_max:
+            chat_req["max_tokens"] = min_max
+        elif not cur_max:
+            chat_req["max_tokens"] = min_max
+
+        return chat_req
+
     def preprocess_chat_request(self, chat_req: dict) -> dict:
         chat_req.pop("logprobs", None)
         chat_req.pop("logit_bias", None)
 
-        # 启用 thinking 模式，利用模型推理能力
-        # reasoning_content 会被 StreamTranslator 转换为 reasoning 输出项
-        # 可通过 model_mapping 中 enable_thinking: false 按模型关闭
-        # budget_tokens 限制推理 token 数，防止模型耗尽所有 token 在推理上
-        if "_disable_thinking" in chat_req:
-            chat_req.pop("_disable_thinking")
-            if "thinking" not in chat_req:
-                chat_req["thinking"] = {"type": "disabled"}
-        elif "thinking" not in chat_req:
-            if self.supports_thinking_budget:
-                budget = chat_req.pop("_thinking_budget", 4096)
-                chat_req["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            else:
-                chat_req.pop("_thinking_budget", None)
-                chat_req["thinking"] = {"type": "enabled"}
-                # 确保 max_tokens 足够容纳 thinking + 实际输出
-                cur_max = chat_req.get("max_tokens", 0)
-                if not cur_max or cur_max < 16384:
-                    chat_req["max_tokens"] = 16384
+        # thinking 控制委托给 apply_thinking
+        chat_req = self.apply_thinking(chat_req)
 
-        # do_sample: 智谱默认采样模式
         if "do_sample" not in chat_req:
             chat_req["do_sample"] = True
 
-        # 修复 tools 格式
         tools = chat_req.get("tools")
         if tools:
             for tool in tools:

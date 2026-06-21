@@ -1,10 +1,12 @@
 """本地 Ollama 适配器 —— 兼容 OpenAI Chat Completions API
 
-文档：https://github.com/ollama/ollama/blob/main/docs/openai.md
-接口：POST http://localhost:11434/v1/chat/completions
+Ollama 运行本地开源模型 (GGUF), 通过 OpenAI 兼容协议暴露 API。
+支持模型: deepseek-r1, qwen3, hunyuan-a13b 等。
 
-Ollama 在本地运行开源模型（如 qwen3、deepseek-v3、llama3 等），
-通过 OpenAI 兼容协议对外提供 API。API Key 可为任意值（默认使用 "ollama" 占位符）。
+thinking 控制:
+  - 不由 Ollama 统一管理, 取决于底层模型
+  - 通过 chat_template_kwargs 传递 (如 qwen3 的 enable_thinking)
+  - 默认关闭 thinking, 本地模型 token 速度有限
 """
 
 from __future__ import annotations
@@ -17,14 +19,15 @@ from .base import BaseAdapter
 class OllamaAdapter(BaseAdapter):
     name = "ollama"
     base_url = "http://localhost:11434/v1"
-    api_key_env = "OLLAMA_API_KEY"  # 可为空
-    unsupported_features: set[str] = set()  # Ollama 兼容 OpenAI Chat API
-    supports_thinking_budget: bool = False  # Ollama 不支持 thinking
+    api_key_env = "OLLAMA_API_KEY"
+    unsupported_features: set[str] = set()
+    supports_thinking_budget: bool = False
+    thinking_mode: str = "off"  # 本地模型默认关闭 thinking
 
     capabilities: dict[str, bool | int] = {
         "tools": True,
         "streaming": True,
-        "reasoning": False,  # 本地模型默认不支持思维链推理
+        "reasoning": False,
         "vision": False,
         "image_gen": False,
         "video_gen": False,
@@ -32,12 +35,19 @@ class OllamaAdapter(BaseAdapter):
         "max_tokens": 8192,
     }
 
-    def get_headers(self, api_key: str) -> dict:
-        """Ollama 不强制鉴权，API Key 为空时使用占位符
+    def apply_thinking(self, chat_req: dict) -> dict:
+        """Ollama 本地模型默认关闭 thinking
 
-        Ollama 的 OpenAI 兼容端点要求 Authorization 头存在但忽略其值，
-        因此当用户未配置 API Key 时使用 "ollama" 作为占位符。
+        本地模型 token 生成速度有限, 开启 thinking 易导致超长等待。
         """
+        chat_req.pop("_disable_thinking", None)
+        chat_req.pop("_thinking_budget", None)
+        chat_req.pop("thinking", None)
+        chat_req.pop("reasoning_effort", None)
+        chat_req.pop("enable_thinking", None)
+        return chat_req
+
+    def get_headers(self, api_key: str) -> dict:
         if not api_key:
             api_key = "ollama"
         return {
@@ -46,22 +56,16 @@ class OllamaAdapter(BaseAdapter):
         }
 
     def preprocess_chat_request(self, chat_req: dict) -> dict:
-        # 移除 Ollama 不支持的字段
         chat_req.pop("logprobs", None)
         chat_req.pop("logit_bias", None)
         chat_req.pop("user", None)
 
-        # stop 限制
         stop = chat_req.get("stop")
         if isinstance(stop, list) and len(stop) > 4:
             chat_req["stop"] = stop[:4]
 
-        # Ollama 本地模型默认不支持思维链推理，强制关闭 thinking
-        chat_req.pop("_disable_thinking", None)
-        chat_req.pop("_thinking_budget", None)
-        chat_req.pop("thinking", None)
+        chat_req = self.apply_thinking(chat_req)
 
-        # 工具格式规范化
         tools = chat_req.get("tools")
         if tools:
             for tool in tools:
@@ -83,7 +87,6 @@ class OllamaAdapter(BaseAdapter):
         return chat_req
 
     def postprocess_chat_response(self, chat_resp: dict) -> dict:
-        """处理 Ollama 非流式响应"""
         choices = chat_resp.get("choices", [])
         for choice in choices:
             msg = choice.get("message", {})
@@ -97,7 +100,6 @@ class OllamaAdapter(BaseAdapter):
         return chat_resp
 
     def stream_event_transform(self, raw_event: dict) -> dict:
-        """Ollama SSE 格式标准化"""
         for choice in raw_event.get("choices", []):
             delta = choice.get("delta", {})
             tool_calls = delta.get("tool_calls", [])
