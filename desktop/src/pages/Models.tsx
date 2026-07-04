@@ -61,11 +61,82 @@ const Models: React.FC = () => {
   });
   const [modelForm, setModelForm] = useState({ ...EMPTY_FORM });
 
+  // 官方 Codex 状态 + provider 预设
+  const [codexStatus, setCodexStatus] = useState<{
+    codex_installed: boolean;
+    config_exists: boolean;
+    auth_status: string;
+    mode: 'official' | 'bridge' | 'unknown';
+    download_url: string;
+    auth_guide: string;
+  } | null>(null);
+  const [presets, setPresets] = useState<Array<{
+    name: string; label: string; adapter: string; base_url: string;
+    api_key_env: string; docs_url: string; models: string[];
+  }>>([]);
+  const [selectedPresetName, setSelectedPresetName] = useState<string>('');
+  const [switchingMode, setSwitchingMode] = useState(false);
+  const [modeMsg, setModeMsg] = useState<string>('');
+
   const load = useCallback(async () => {
     try { const res = await api.getModels(); setModels(res.models || []); } catch { /* */ }
+    // 并行加载 Codex 状态和 provider 预设（失败不阻塞）
+    try {
+      const [status, pres] = await Promise.all([
+        api.getCodexStatus().catch(() => null),
+        api.getProviderPresets().catch(() => null),
+      ]);
+      if (status) setCodexStatus(status);
+      if (pres) setPresets(pres.presets || []);
+    } catch { /* */ }
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const selectedPreset = presets.find(p => p.name === selectedPresetName);
+
+  // 选中预设时自动填充 cardForm 的 provider/adapter/base_url/api_key_env
+  const handlePresetChange = (name: string) => {
+    setSelectedPresetName(name);
+    const p = presets.find(x => x.name === name);
+    if (p) {
+      setCardForm(prev => ({
+        ...prev,
+        provider: p.name,
+        adapter: p.adapter,
+        base_url: p.base_url,
+        api_key_env: p.api_key_env,
+        target: p.models[0] || '',
+        // alias 默认取 target 的简短名
+        alias: prev.alias || p.models[0]?.split('/').pop()?.split(':').pop() || p.name,
+      }));
+    }
+  };
+
+  // 切换 Codex 模式（官方/桥接器）
+  const handleSwitchMode = async (target: 'official' | 'bridge') => {
+    if (!codexStatus || target === codexStatus.mode || switchingMode) return;
+    setSwitchingMode(true);
+    setModeMsg('');
+    try {
+      const result = await api.switchCodexMode(target);
+      if (result.success) {
+        setModeMsg(result.message);
+        // 刷新状态
+        try {
+          const status = await api.getCodexStatus();
+          setCodexStatus(status);
+        } catch { /* */ }
+      } else {
+        setModeMsg(result.message || '切换失败');
+      }
+    } catch (e) {
+      setModeMsg(`切换失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSwitchingMode(false);
+      setTimeout(() => setModeMsg(''), 4000);
+    }
+  };
 
   const allAliases = models.map(m => m.alias);
   const groups = groupByProvider(models);
@@ -137,16 +208,20 @@ const Models: React.FC = () => {
   // ═══ Card Form (Add Provider) ═════════════════
   const openCardForm = () => {
     setCardForm({ provider: '', adapter: 'deepseek', base_url: '', api_key_env: '', api_key: '', alias: '', target: '', mtype: 'text' });
+    setSelectedPresetName('');
     setShowCardForm(true);
   };
 
   const handleAddCard = async () => {
-    if (!cardForm.provider || !cardForm.alias || !cardForm.target) return;
+    // provider 和 api_key 必填；alias/target 由预设自动填充，兜底用 provider 名
+    if (!cardForm.provider || !cardForm.api_key) return;
+    const alias = cardForm.alias || cardForm.target || cardForm.provider;
+    const target = cardForm.target || cardForm.provider;
     setLoading(true);
     try {
       const flags = typeToFlags(cardForm.mtype);
       await api.addModel({
-        alias: cardForm.alias, target_model: cardForm.target,
+        alias, target_model: target,
         provider: cardForm.provider, adapter: cardForm.adapter,
         base_url: cardForm.base_url, api_key: cardForm.api_key,
         api_key_env: cardForm.api_key_env, enabled: true,
@@ -207,6 +282,73 @@ const Models: React.FC = () => {
         <h2>{tl('models.title')}</h2>
         <button className="btn btn-primary" onClick={openCardForm}>+ {tl('models.addCard')}</button>
       </div>
+
+      {/* ── 官方 Codex 状态卡 ─────────────────────── */}
+      {codexStatus && (
+        <div className="card codex-status-card">
+          <div className="codex-status-header">
+            <span className="codex-logo">◆</span>
+            <div className="codex-title-area">
+              <span className="codex-title">Codex 官方</span>
+              <span className={`codex-mode-badge mode-${codexStatus.mode}`}>
+                {codexStatus.mode === 'official' ? '官方模式' : codexStatus.mode === 'bridge' ? '桥接器模式' : '未知'}
+              </span>
+            </div>
+            <div className="codex-status-badges">
+              <span className={`status-chip ${codexStatus.codex_installed ? 'ok' : 'err'}`}>
+                {codexStatus.codex_installed ? '✓ 已安装' : '✗ 未安装'}
+              </span>
+              <span className={`status-chip ${codexStatus.auth_status === 'valid' ? 'ok' : 'warn'}`}>
+                {codexStatus.auth_status === 'valid' ? '✓ 已登录' :
+                  codexStatus.auth_status === 'missing' ? '未登录' :
+                  codexStatus.auth_status === 'corrupted' ? '登录态损坏' : '登录态异常'}
+              </span>
+            </div>
+          </div>
+
+          {/* 未安装或未登录时的引导提示 */}
+          {!codexStatus.codex_installed && (
+            <div className="codex-guide error">
+              未检测到 Codex 安装。请先安装 Codex 桌面端并用 ChatGPT 账号登录，桥接器模式才能生效。
+              <a href={codexStatus.download_url} target="_blank" rel="noopener noreferrer" className="guide-link">
+                下载 Codex →
+              </a>
+            </div>
+          )}
+          {codexStatus.codex_installed && codexStatus.auth_status !== 'valid' && (
+            <div className="codex-guide warn">
+              {codexStatus.auth_guide}
+            </div>
+          )}
+
+          {/* 模式切换按钮 */}
+          <div className="codex-mode-switch">
+            <button
+              className={`btn btn-sm ${codexStatus.mode === 'official' ? 'btn-active' : ''}`}
+              onClick={() => handleSwitchMode('official')}
+              disabled={switchingMode || codexStatus.mode === 'official' || !codexStatus.config_exists}
+              title={!codexStatus.config_exists ? '需要先安装 Codex（生成 config.toml）' : ''}
+            >
+              官方模式
+            </button>
+            <button
+              className={`btn btn-sm ${codexStatus.mode === 'bridge' ? 'btn-active' : ''}`}
+              onClick={() => handleSwitchMode('bridge')}
+              disabled={switchingMode || codexStatus.mode === 'bridge' || !codexStatus.config_exists}
+              title={!codexStatus.config_exists ? '需要先安装 Codex（生成 config.toml）' : ''}
+            >
+              桥接器模式
+            </button>
+            {switchingMode && <span className="mode-msg-inline">切换中...</span>}
+            {modeMsg && <span className={`mode-msg-inline ${modeMsg.includes('失败') ? 'error' : 'success'}`}>{modeMsg}</span>}
+          </div>
+          {codexStatus.mode === 'bridge' && codexStatus.auth_status !== 'valid' && (
+            <p className="codex-hint">
+              ⚠ 桥接器模式下若没有官方登录态，Codex 桌面端会隐藏自定义模型和插件。请先用 ChatGPT 账号登录 Codex。
+            </p>
+          )}
+        </div>
+      )}
 
       {!hasTextModel && models.length > 0 && (
         <div className="warning-banner">
@@ -464,64 +606,92 @@ const Models: React.FC = () => {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h3>{tl('models.addCard')}</h3>
 
-            <div className="form-grid">
-              <div className="form-group">
-                <label>{tl('models.provider')}</label>
-                <input value={cardForm.provider}
-                  onChange={e => setCardForm({ ...cardForm, provider: e.target.value })}
-                  placeholder="zhipu" />
-              </div>
-              <div className="form-group">
-                <label>{tl('models.adapter')}</label>
-                <select value={cardForm.adapter}
-                  onChange={e => setCardForm({ ...cardForm, adapter: e.target.value })}>
-                  {adapterOptions.map((a: string) => <option key={a} value={a}>{a}</option>)}
-                </select>
-              </div>
-              <div className="form-group full-width">
-                <label>{tl('models.baseUrl')}</label>
-                <input value={cardForm.base_url}
-                  onChange={e => setCardForm({ ...cardForm, base_url: e.target.value })}
-                  placeholder="https://open.bigmodel.cn/api/paas/v4" />
-              </div>
-              <div className="form-group">
-                <label>API Key Env</label>
-                <input value={cardForm.api_key_env}
-                  onChange={e => setCardForm({ ...cardForm, api_key_env: e.target.value })}
-                  placeholder="ZHIPU_API_KEY" />
-              </div>
-              <div className="form-group">
-                <label>{tl('models.apiKey')}</label>
-                <input type="password" value={cardForm.api_key}
-                  onChange={e => setCardForm({ ...cardForm, api_key: e.target.value })} />
-              </div>
-
-              <div className="form-group full-width" style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-                <label style={{ fontWeight: 600 }}>首个模型</label>
-              </div>
-              <div className="form-group">
-                <label>{tl('models.alias')}</label>
-                <input value={cardForm.alias}
-                  onChange={e => setCardForm({ ...cardForm, alias: e.target.value })} />
-              </div>
-              <div className="form-group">
-                <label>{tl('models.target')}</label>
-                <input value={cardForm.target}
-                  onChange={e => setCardForm({ ...cardForm, target: e.target.value })} />
-              </div>
-              <div className="form-group full-width">
-                <label>Model Type</label>
-                <select value={cardForm.mtype} onChange={e => setCardForm({ ...cardForm, mtype: e.target.value as ModelType })}>
-                  {(Object.keys(TYPE_LABELS) as ModelType[]).map(t => (
-                    <option key={t} value={t}>{typeLabel(t)}</option>
-                  ))}
-                </select>
-              </div>
+            {/* 步骤 1：选择 provider 预设（自动填充 base_url/adapter/api_key_env/默认模型） */}
+            <div className="form-group full-width" style={{ marginBottom: 12 }}>
+              <label style={{ fontWeight: 600 }}>① 选择模型服务商</label>
+              <select value={selectedPresetName} onChange={e => handlePresetChange(e.target.value)}>
+                <option value="">— 请选择 —</option>
+                {presets.map(p => (
+                  <option key={p.name} value={p.name}>{p.label}</option>
+                ))}
+              </select>
+              {selectedPreset && selectedPreset.docs_url && (
+                <a href={selectedPreset.docs_url} target="_blank" rel="noopener noreferrer"
+                   style={{ fontSize: 12, color: 'var(--accent)', marginTop: 4, display: 'inline-block' }}>
+                  → 前往申请 API Key
+                </a>
+              )}
             </div>
+
+            {/* 选中预设后显示自动填充的信息（只读展示） */}
+            {selectedPreset && (
+              <div className="preset-info-box">
+                <div className="preset-info-row">
+                  <span className="preset-info-label">API 地址：</span>
+                  <code>{selectedPreset.base_url}</code>
+                </div>
+                <div className="preset-info-row">
+                  <span className="preset-info-label">默认模型：</span>
+                  <code>{cardForm.target || selectedPreset.models[0]}</code>
+                </div>
+              </div>
+            )}
+
+            {/* 步骤 2：填 API Key（唯一必填项） */}
+            {selectedPreset && (
+              <div className="form-grid" style={{ marginTop: 12 }}>
+                <div className="form-group full-width">
+                  <label style={{ fontWeight: 600 }}>② 输入 API Key</label>
+                  <input type="password" value={cardForm.api_key}
+                    onChange={e => setCardForm({ ...cardForm, api_key: e.target.value })}
+                    placeholder="粘贴你的 API Key"
+                    autoFocus />
+                </div>
+              </div>
+            )}
+
+            {/* 未选预设时的提示 */}
+            {!selectedPreset && (
+              <p className="muted" style={{ fontSize: 13, marginTop: 12 }}>
+                选择服务商后，API 地址、适配器、默认模型都会自动填好，你只需要填 API Key。
+              </p>
+            )}
+
+            {/* 高级选项（可折叠）：模型名/显示名/类型 */}
+            {selectedPreset && (
+              <details className="advanced-section" style={{ marginTop: 12 }}>
+                <summary>高级选项（默认使用服务商推荐模型，可在此修改）</summary>
+                <div className="form-grid">
+                  <div className="form-group">
+                    <label>模型名（target）</label>
+                    <input list="preset-models" value={cardForm.target}
+                      onChange={e => setCardForm({ ...cardForm, target: e.target.value })}
+                      placeholder="deepseek-v4-pro" />
+                    <datalist id="preset-models">
+                      {selectedPreset.models.map(m => <option key={m} value={m} />)}
+                    </datalist>
+                  </div>
+                  <div className="form-group">
+                    <label>显示名（alias）</label>
+                    <input value={cardForm.alias}
+                      onChange={e => setCardForm({ ...cardForm, alias: e.target.value })}
+                      placeholder="gpt-5-code" />
+                  </div>
+                  <div className="form-group full-width">
+                    <label>模型类型</label>
+                    <select value={cardForm.mtype} onChange={e => setCardForm({ ...cardForm, mtype: e.target.value as ModelType })}>
+                      {(Object.keys(TYPE_LABELS) as ModelType[]).map(t => (
+                        <option key={t} value={t}>{typeLabel(t)}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </details>
+            )}
 
             <div className="modal-actions">
               <button className="btn" onClick={() => setShowCardForm(false)}>{tl('common.cancel')}</button>
-              <button className="btn btn-primary" onClick={handleAddCard} disabled={loading}>
+              <button className="btn btn-primary" onClick={handleAddCard} disabled={loading || !selectedPreset || !cardForm.api_key}>
                 {tl('common.save')}
               </button>
             </div>

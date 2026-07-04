@@ -6,15 +6,18 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 
 from .config import get_config
 from .adapters import get_registry
 from .stats import get_stats, RequestLog
 from .client import UpstreamClient
+from .catalog import get_codex_mode, switch_codex_mode
 
 logger = logging.getLogger("code-cn-bridge")
 
@@ -34,7 +37,7 @@ async def get_status():
         "running": True,
         "host": cfg.server_host,
         "port": cfg.server_port,
-        "version": "0.3.22",
+        "version": "0.5.0",
         "stats": stats.get_summary(),
     }
 
@@ -903,33 +906,372 @@ async def export_codex_config():
 
 @router.get("/codex-auth")
 async def export_codex_auth():
-    """生成 ~/.codex/auth.json 内容（占位 key，绕过 OpenAI 登录白屏）"""
+    """检查 ~/.codex/auth.json 官方登录态（CC Switch v3.16.0+ 保留机制）
+
+    核心原则（参考 CC Switch v3.16.4 codex-official-auth-preservation-guide）：
+    - **不生成占位 auth.json**：覆盖官方登录态会导致 Codex 桌面端门控隐藏
+      自定义模型与插件功能（computer_use/web_search/apply_patch 等）
+    - 第三方 API Key 只写进 config.toml 的 [model_providers.xxx] 段
+    - auth.json 必须保留官方 ChatGPT/Codex 登录缓存
+    """
     try:
         cfg = get_config()
         host = cfg.server_host
         port = cfg.server_port
-        # 占位 key，bridge 不校验
-        placeholder_key = "sk-bridge-local"
-        auth_json = {
-            "OPENAI_API_KEY": placeholder_key,
-        }
-        import json as _json
+        codex_home = Path.home() / ".codex"
+        auth_path = codex_home / "auth.json"
+
+        # 检查官方登录态是否存在且有效
+        auth_status = "unknown"
+        auth_exists = auth_path.exists()
+        has_official_token = False
+        auth_keys: list[str] = []
+
+        if auth_exists:
+            try:
+                auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
+                auth_keys = list(auth_data.keys()) if isinstance(auth_data, dict) else []
+                # 官方登录态的特征字段：tokens / account_id / id_token 等
+                has_official_token = any(
+                    k in auth_data
+                    for k in ("tokens", "account_id", "id_token", "access_token")
+                ) if isinstance(auth_data, dict) else False
+                # 检测是否被旧的占位 key 覆盖（项目历史遗留问题）
+                if isinstance(auth_data, dict) and auth_data.get("OPENAI_API_KEY") == "sk-bridge-local":
+                    auth_status = "corrupted"  # 被占位 key 覆盖，需要重新登录
+                elif has_official_token:
+                    auth_status = "valid"
+                else:
+                    auth_status = "incomplete"
+            except Exception as e:
+                auth_status = "parse_error"
+                logger.warning("解析 auth.json 失败: %s", e)
+        else:
+            auth_status = "missing"
+
         return {
-            "auth_json": _json.dumps(auth_json, indent=2),
-            "auth_path": "~/.codex/auth.json",
-            "config_path": "~/.codex/config.toml",
+            "auth_path": str(auth_path),
+            "config_path": str(codex_home / "config.toml"),
             "endpoint": f"http://{host}:{port}/v1",
-            "instructions": [
-                "1. 将 config.toml 内容写入 ~/.codex/config.toml",
-                "2. 将 auth.json 内容写入 ~/.codex/auth.json",
-                "3. 设置环境变量 OPENAI_API_KEY=sk-bridge-local",
-                "4. 确保 bridge 正在运行（桌面应用已启动）",
-                "5. 运行 codex 即可，无需登录 OpenAI",
-            ],
+            "auth_status": auth_status,
+            "auth_exists": auth_exists,
+            "has_official_token": has_official_token,
+            "auth_keys": auth_keys,
+            # 关键：不再返回 auth_json 内容，避免前端覆盖官方登录态
+            "preserve_official_auth": True,
+            "instructions": _build_auth_instructions(auth_status),
         }
     except Exception as exc:
-        logger.error("生成 Codex auth 失败: %s", exc, exc_info=True)
+        logger.error("检查 Codex auth 失败: %s", exc, exc_info=True)
         return {"error": str(exc)}
+
+
+def _build_auth_instructions(auth_status: str) -> list[str]:
+    """根据 auth.json 状态生成对应的操作指引
+
+    参考 CC Switch v3.16.4 codex-desktop-custom-model-visibility-zh.md：
+    - Codex 桌面端通过 auth.json 检测官方登录态来放行自定义模型和插件
+    - 任何覆盖 auth.json 的行为都会触发门控回落
+    """
+    if auth_status == "valid":
+        return [
+            "✓ 已检测到官方 ChatGPT/Codex 登录态，请保持 ~/.codex/auth.json 不变",
+            "✓ 第三方 API Key 已写入 config.toml 的 [model_providers.custom] 段",
+            "✓ 模型请求会走 bridge 转换，但插件/手机远程等官方功能继续可用",
+            "1. 确保 bridge 正在运行（桌面应用已启动）",
+            "2. 打开 Codex 桌面端，自定义模型应可见且插件可用",
+            "警告：切勿用任何工具覆盖 auth.json，否则插件功能会失效",
+        ]
+    if auth_status == "corrupted":
+        return [
+            "✗ 检测到 auth.json 被占位 key (sk-bridge-local) 覆盖，这正是插件失效的根因",
+            "修复步骤：",
+            "1. 完全退出 Codex 桌面端（任务栏托盘右键 exit）",
+            "2. 删除 ~/.codex/auth.json",
+            "3. 打开 Codex 桌面端，使用 ChatGPT 账号登录一次（建立官方登录态）",
+            "4. 登录后完全退出 Codex（托盘 exit）",
+            "5. 启动 bridge 桌面应用，重新生成 config.toml（不会动 auth.json）",
+            "6. 打开 Codex 桌面端，自定义模型和插件都应可用",
+        ]
+    if auth_status == "missing":
+        return [
+            "✗ 未检测到 ~/.codex/auth.json，Codex 桌面端会门控隐藏自定义模型和插件",
+            "修复步骤：",
+            "1. 打开 Codex 桌面端或 CLI",
+            "2. 使用 ChatGPT 账号登录（建立官方登录态到 ~/.codex/auth.json）",
+            "3. 登录后完全退出 Codex（任务栏托盘右键 exit）",
+            "4. 启动 bridge 桌面应用，配置第三方模型",
+            "5. 打开 Codex 桌面端，自定义模型和插件都应可用",
+            "警告：bridge 不会自动生成 auth.json，必须通过官方登录建立",
+        ]
+    # incomplete / parse_error / unknown
+    return [
+        f"! auth.json 状态异常：{auth_status}",
+        "建议：完全退出 Codex，重新用 ChatGPT 账号登录一次以重建官方登录态",
+        "bridge 不会修改 auth.json，第三方 API Key 只写入 config.toml",
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Codex 配置模式切换（参考 CC Switch 的配置切换器）
+# ═══════════════════════════════════════════════════════════════════
+
+@router.get("/codex-mode")
+async def get_codex_mode_endpoint():
+    """获取当前 Codex 配置模式
+
+    返回：
+    - mode: "official"（官方 ChatGPT 账号）或 "bridge"（桥接器代理）
+    - auth_status: auth.json 官方登录态状态
+    """
+    try:
+        mode = get_codex_mode()
+        # 顺便返回 auth 状态，让前端显示登录态是否可用
+        auth_path = Path.home() / ".codex" / "auth.json"
+        auth_status = "missing"
+        if auth_path.exists():
+            try:
+                auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
+                if isinstance(auth_data, dict):
+                    if auth_data.get("OPENAI_API_KEY") == "sk-bridge-local":
+                        auth_status = "corrupted"
+                    elif any(k in auth_data for k in ("tokens", "account_id", "id_token", "access_token")):
+                        auth_status = "valid"
+                    else:
+                        auth_status = "incomplete"
+            except Exception:
+                auth_status = "parse_error"
+
+        return {
+            "mode": mode,
+            "auth_status": auth_status,
+            "mode_description": _mode_description(mode),
+        }
+    except Exception as exc:
+        logger.error("获取 Codex 模式失败: %s", exc, exc_info=True)
+        return {"error": str(exc), "mode": "unknown"}
+
+
+@router.post("/codex-mode")
+async def switch_codex_mode_endpoint(request: Request):
+    """切换 Codex 配置模式
+
+    请求体：{"mode": "official" | "bridge"}
+
+    - official: 使用官方 ChatGPT 账号，移除桥接器字段
+    - bridge: 使用桥接器代理，添加 model_provider/base_url/catalog 等
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            content={"error": "无效的 JSON 请求体"},
+            status_code=400,
+        )
+
+    mode = body.get("mode", "").strip().lower()
+    if mode not in ("official", "bridge"):
+        return JSONResponse(
+            content={"error": f"无效的 mode: {mode}（支持: official / bridge）"},
+            status_code=400,
+        )
+
+    result = switch_codex_mode(mode)
+    status_code = 200 if result.get("success") else 400
+    return JSONResponse(content=result, status_code=status_code)
+
+
+def _mode_description(mode: str) -> str:
+    """模式中文描述"""
+    if mode == "bridge":
+        return "桥接器模式：使用国产模型（DeepSeek/Kimi/GLM 等），通过本地代理转换协议"
+    if mode == "official":
+        return "官方模式：使用 ChatGPT 账号额度，官方模型和插件全功能可用"
+    return f"未知模式: {mode}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Provider 预设 & Codex 安装状态
+# ═══════════════════════════════════════════════════════════════════
+
+# 内置 provider 预设模板：用户添加卡片时选预设即可自动填充 base_url/adapter/api_key_env
+# 字段说明：
+#   name:        provider 标识（写入 config.yaml 的 key）
+#   label:       展示名
+#   adapter:     适配器类型
+#   base_url:    API 基础地址
+#   api_key_env: 环境变量名
+#   docs_url:    API Key 申请文档
+#   models:      推荐模型列表（target_model）
+_PROVIDER_PRESETS: list[dict] = [
+    {
+        "name": "deepseek",
+        "label": "DeepSeek 深度求索",
+        "adapter": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "docs_url": "https://platform.deepseek.com/api_keys",
+        "models": ["deepseek-v4", "deepseek-v4-pro", "deepseek-reasoner"],
+    },
+    {
+        "name": "zhipu",
+        "label": "智谱 GLM",
+        "adapter": "zhipu",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPU_API_KEY",
+        "docs_url": "https://open.bigmodel.cn/usercenter/apikeys",
+        "models": ["glm-5", "glm-5.1", "glm-5.2", "glm-4-plus"],
+    },
+    {
+        "name": "qwen",
+        "label": "通义千问 阿里云",
+        "adapter": "qwen",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key_env": "QWEN_API_KEY",
+        "docs_url": "https://bailian.console.aliyun.com/?apiKey=1#/api-key",
+        "models": ["qwen3-coder-plus", "qwen3.7-max", "qwen3.7-plus"],
+    },
+    {
+        "name": "kimi",
+        "label": "Kimi 月之暗面",
+        "adapter": "kimi",
+        "base_url": "https://api.moonshot.cn/v1",
+        "api_key_env": "KIMI_API_KEY",
+        "docs_url": "https://platform.moonshot.cn/console/api-keys",
+        "models": ["kimi-k2-6", "kimi-k2-7-code"],
+    },
+    {
+        "name": "doubao",
+        "label": "豆包 字节跳动",
+        "adapter": "doubao",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "api_key_env": "ARK_API_KEY",
+        "docs_url": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+        "models": ["doubao-pro-1-5", "doubao-seed-1-8", "doubao-seed-2-0"],
+    },
+    {
+        "name": "ernie",
+        "label": "文心一言 百度",
+        "adapter": "ernie",
+        "base_url": "https://qianfan.baidubce.com/v2",
+        "api_key_env": "ERNIE_API_KEY",
+        "docs_url": "https://console.bce.baidu.com/qianfan/ais/console/applicationConsole/application",
+        "models": ["ernie-5.1", "ernie-speed-pro-128k"],
+    },
+    {
+        "name": "hunyuan",
+        "label": "混元 腾讯",
+        "adapter": "hunyuan",
+        "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
+        "api_key_env": "HUNYUAN_API_KEY",
+        "docs_url": "https://console.cloud.tencent.com/hunyuan/api-key",
+        "models": ["hunyuan-pro", "hunyuan-turbo"],
+    },
+    {
+        "name": "minimax",
+        "label": "MiniMax",
+        "adapter": "minimax",
+        "base_url": "https://api.minimaxi.com/v1",
+        "api_key_env": "MINIMAX_API_KEY",
+        "docs_url": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+        "models": ["MiniMax-M2.7", "MiniMax-M3"],
+    },
+    {
+        "name": "siliconflow",
+        "label": "硅基流动 SiliconFlow",
+        "adapter": "siliconflow",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "api_key_env": "SILICONFLOW_API_KEY",
+        "docs_url": "https://cloud.siliconflow.cn/account/ak",
+        "models": ["deepseek-ai/DeepSeek-V4", "Qwen/Qwen3.7-Max"],
+    },
+    {
+        "name": "spark",
+        "label": "讯飞星火",
+        "adapter": "spark",
+        "base_url": "https://spark-api-open.xf-yun.com/v1",
+        "api_key_env": "SPARK_API_KEY",
+        "docs_url": "https://console.xfyun.cn/services/bm4",
+        "models": ["spark-max", "spark-pro"],
+    },
+    {
+        "name": "agnes",
+        "label": "Agnes 聚合",
+        "adapter": "agnes",
+        "base_url": "https://apihub.agnes-ai.com/v1",
+        "api_key_env": "AGNES_API_KEY",
+        "docs_url": "",
+        "models": ["agnes-1.5-flash", "agnes-2.0-flash", "agnes-image-2.1-flash", "agnes-video-v2.0"],
+    },
+    {
+        "name": "ollama",
+        "label": "Ollama 本地",
+        "adapter": "ollama",
+        "base_url": "http://localhost:11434/v1",
+        "api_key_env": "OLLAMA_API_KEY",
+        "docs_url": "https://ollama.com/download",
+        "models": ["qwen3:latest", "deepseek-v3:latest", "llama3:latest"],
+    },
+]
+
+
+@router.get("/provider-presets")
+async def get_provider_presets():
+    """返回内置 provider 预设模板列表
+
+    供前端"添加模型卡片"时选择预设，自动填充 base_url/adapter/api_key_env。
+    """
+    return {"presets": _PROVIDER_PRESETS}
+
+
+@router.get("/codex-status")
+async def get_codex_status():
+    """返回 Codex 安装与登录状态的综合信息
+
+    供前端 Models 页面顶部"官方 Codex 状态卡"使用：
+    - codex_installed: ~/.codex 目录是否存在（Codex 桌面端/CLI 是否安装过）
+    - config_exists:  config.toml 是否存在
+    - auth_status:    auth.json 官方登录态状态
+    - mode:           当前配置模式（official/bridge）
+    - download_url:   Codex 官方下载链接
+    """
+    codex_home = Path.home() / ".codex"
+    config_path = codex_home / "config.toml"
+    auth_path = codex_home / "auth.json"
+
+    codex_installed = codex_home.exists()
+    config_exists = config_path.exists()
+
+    auth_status = "missing"
+    if auth_path.exists():
+        try:
+            auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
+            if isinstance(auth_data, dict):
+                if auth_data.get("OPENAI_API_KEY") == "sk-bridge-local":
+                    auth_status = "corrupted"
+                elif any(k in auth_data for k in ("tokens", "account_id", "id_token", "access_token")):
+                    auth_status = "valid"
+                else:
+                    auth_status = "incomplete"
+        except Exception:
+            auth_status = "parse_error"
+
+    try:
+        mode = get_codex_mode()
+    except Exception:
+        mode = "official"
+
+    return {
+        "codex_installed": codex_installed,
+        "config_exists": config_exists,
+        "auth_status": auth_status,
+        "mode": mode,
+        "download_url": "https://chatgpt.com/codex",
+        "auth_guide": (
+            "打开 Codex 桌面端 → 使用 ChatGPT 账号登录（不要用 API Key 登录），"
+            "登录成功后会自动写入 ~/.codex/auth.json"
+        ),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════

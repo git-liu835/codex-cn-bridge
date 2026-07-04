@@ -2,9 +2,16 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import type { ProxyStatus, ModelConfig } from '../types';
 
+type CodexMode = 'official' | 'bridge' | 'unknown';
+
 const Dashboard: React.FC = () => {
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [models, setModels] = useState<ModelConfig[]>([]);
+  const [codexMode, setCodexMode] = useState<CodexMode>('unknown');
+  const [authStatus, setAuthStatus] = useState<string>('unknown');
+  const [modeDescription, setModeDescription] = useState<string>('');
+  const [switching, setSwitching] = useState(false);
+  const [modeMessage, setModeMessage] = useState<string>('');
 
   const load = useCallback(async () => {
     try {
@@ -14,12 +21,62 @@ const Dashboard: React.FC = () => {
     } catch {
       setStatus(null);
     }
+    // 单独加载 Codex 模式（失败不阻塞仪表板）
+    try {
+      const modeData = await api.getCodexMode();
+      setCodexMode(modeData.mode);
+      setAuthStatus(modeData.auth_status);
+      setModeDescription(modeData.mode_description || '');
+    } catch {
+      // bridge 未运行时静默
+    }
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
+  const handleSwitchMode = useCallback(async (target: 'official' | 'bridge') => {
+    if (target === codexMode || switching) return;
+    setSwitching(true);
+    setModeMessage('');
+    try {
+      const result = await api.switchCodexMode(target);
+      if (result.success) {
+        setCodexMode(target);
+        setModeMessage(result.message);
+        // 切换到 bridge 模式时，重新加载模式描述
+        try {
+          const modeData = await api.getCodexMode();
+          setCodexMode(modeData.mode);
+          setAuthStatus(modeData.auth_status);
+          setModeDescription(modeData.mode_description || '');
+        } catch {
+          // ignore
+        }
+      } else {
+        setModeMessage(result.message || '切换失败');
+      }
+    } catch (e) {
+      setModeMessage(`切换失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSwitching(false);
+      // 3 秒后清空消息
+      setTimeout(() => setModeMessage(''), 3000);
+    }
+  }, [codexMode, switching]);
+
   const uptime = status ? Math.floor(status.stats.uptime_seconds) : 0;
   const uptimeStr = `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${uptime % 60}s`;
+
+  // auth 状态中文映射
+  const authStatusText: Record<string, string> = {
+    valid: '官方登录正常',
+    missing: '未登录',
+    corrupted: '登录态损坏',
+    incomplete: '登录态不完整',
+    parse_error: '登录态解析失败',
+    unknown: '未知',
+  };
+  const authStatusClass = authStatus === 'valid' ? 'success' : (authStatus === 'missing' || authStatus === 'corrupted' ? 'error' : 'warn');
 
   return (
     <div className="page">
@@ -59,6 +116,46 @@ const Dashboard: React.FC = () => {
               <span className="stat-label">平均延迟</span>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* Codex 配置模式切换器 */}
+      <div className="card mode-switcher-card">
+        <h3>Codex 配置模式</h3>
+        <div className="mode-switcher-body">
+          <div className="mode-current">
+            <span className="mode-label">当前模式：</span>
+            <span className={`mode-badge mode-${codexMode}`}>
+              {codexMode === 'official' ? '官方' : codexMode === 'bridge' ? '桥接器' : '未知'}
+            </span>
+            <span className={`auth-status auth-${authStatusClass}`}>
+              {authStatusText[authStatus] || authStatus}
+            </span>
+          </div>
+          {modeDescription && <p className="mode-desc muted">{modeDescription}</p>}
+          <div className="mode-buttons">
+            <button
+              className={`btn ${codexMode === 'official' ? 'btn-active' : 'btn-secondary'}`}
+              onClick={() => handleSwitchMode('official')}
+              disabled={switching || codexMode === 'official'}
+            >
+              官方模式
+            </button>
+            <button
+              className={`btn ${codexMode === 'bridge' ? 'btn-active' : 'btn-secondary'}`}
+              onClick={() => handleSwitchMode('bridge')}
+              disabled={switching || codexMode === 'bridge'}
+            >
+              桥接器模式
+            </button>
+          </div>
+          {switching && <p className="mode-msg">切换中...</p>}
+          {modeMessage && <p className={`mode-msg ${modeMessage.includes('失败') ? 'error' : 'success'}`}>{modeMessage}</p>}
+          {codexMode === 'bridge' && authStatus !== 'valid' && (
+            <p className="mode-msg warn">
+              桥接器模式需要官方登录态才能使用插件功能，请先用 ChatGPT 账号登录 Codex
+            </p>
+          )}
         </div>
       </div>
 

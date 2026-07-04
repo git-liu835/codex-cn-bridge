@@ -112,11 +112,14 @@ def build_responses_response(
     output_items: list[dict],
     model: str,
     usage: dict | None = None,
+    status: str = "completed",
 ) -> dict:
+    import time as _time
     return {
         "id": _uid("resp"),
         "object": "response",
-        "status": "completed",
+        "created_at": int(_time.time()),
+        "status": status,
         "model": model,
         "output": output_items,
         "usage": usage or {},

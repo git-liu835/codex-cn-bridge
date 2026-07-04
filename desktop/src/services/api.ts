@@ -87,13 +87,63 @@ export const api = {
     }>('/admin/api/codex-config'),
   getCodexAuth: () =>
     request<{
-      auth_json: string;
       auth_path: string;
       config_path: string;
       endpoint: string;
+      auth_status: string;
+      auth_exists: boolean;
+      has_official_token: boolean;
+      auth_keys: string[];
+      preserve_official_auth: boolean;
       instructions: string[];
       error?: string;
     }>('/admin/api/codex-auth'),
+
+  // Codex 配置模式切换（官方 / 桥接器）
+  getCodexMode: () =>
+    request<{
+      mode: 'official' | 'bridge' | 'unknown';
+      auth_status: string;
+      mode_description: string;
+      error?: string;
+    }>('/admin/api/codex-mode'),
+  switchCodexMode: (mode: 'official' | 'bridge') =>
+    request<{
+      success: boolean;
+      mode: string;
+      message: string;
+      endpoint?: string | null;
+      default_model?: string | null;
+    }>('/admin/api/codex-mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
+
+  // Codex 安装与登录状态（Models 页面顶部"官方 Codex 状态卡"使用）
+  getCodexStatus: () =>
+    request<{
+      codex_installed: boolean;
+      config_exists: boolean;
+      auth_status: 'valid' | 'missing' | 'corrupted' | 'incomplete' | 'parse_error' | 'unknown';
+      mode: 'official' | 'bridge' | 'unknown';
+      download_url: string;
+      auth_guide: string;
+      error?: string;
+    }>('/admin/api/codex-status'),
+
+  // 内置 provider 预设模板（添加卡片时选预设自动填充配置）
+  getProviderPresets: () =>
+    request<{
+      presets: Array<{
+        name: string;
+        label: string;
+        adapter: string;
+        base_url: string;
+        api_key_env: string;
+        docs_url: string;
+        models: string[];
+      }>;
+    }>('/admin/api/provider-presets'),
 
   // 获取 /v1/models 端点返回的模型列表（Codex 桌面版会调用此端点显示模型）
   getV1Models: () =>

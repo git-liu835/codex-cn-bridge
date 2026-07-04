@@ -9,7 +9,7 @@ import click
 
 
 @click.group()
-@click.version_option(version="0.3.22", prog_name="code-cn-bridge")
+@click.version_option(version="0.5.0", prog_name="code-cn-bridge")
 def main():
     """code CN Bridge - 国产模型本地代理
 

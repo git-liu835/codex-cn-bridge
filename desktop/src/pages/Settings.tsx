@@ -127,7 +127,8 @@ const Settings: React.FC = () => {
       if (cfgData.error) { setCodexError(cfgData.error); return; }
       if (authData.error) { setCodexError(authData.error); return; }
       setCodexConfig(cfgData.config);
-      setCodexAuth(authData.auth_json);
+      // 后端不再返回 auth_json 内容（保留官方登录态），改用 instructions 拼接显示
+      setCodexAuth(authData.instructions ? authData.instructions.join('\n') : '');
       setCodexMeta({ default_model: cfgData.default_model, enabled_count: cfgData.enabled_count });
       setV1Models(modelsData.data || []);
     } catch (err: any) {
@@ -345,15 +346,12 @@ const Settings: React.FC = () => {
             </div>
 
             <div className="form-group full-width">
-              <label>{tl('settings.codexAuthJson')}</label>
-              <textarea value={codexAuth} readOnly rows={4}
+              <label>auth.json 登录态状态</label>
+              <textarea value={codexAuth} readOnly rows={6}
                 style={{ fontFamily: 'monospace', fontSize: 12, width: '100%' }} />
               <div style={{ marginTop: 6, display: 'flex', gap: 8 }}>
                 <button className="btn btn-sm" onClick={() => handleCopy('auth')}>
                   {copiedField === 'auth' ? tl('settings.codexCopied') : tl('settings.codexCopy')}
-                </button>
-                <button className="btn btn-sm" onClick={() => downloadText('auth.json', codexAuth)}>
-                  {tl('settings.codexDownloadAuth')}
                 </button>
               </div>
             </div>
@@ -361,10 +359,10 @@ const Settings: React.FC = () => {
             <div style={{ marginTop: 12, padding: 12, background: 'var(--bg-elevated, rgba(255,255,255,0.04))', borderRadius: 6, fontSize: 13 }}>
               <strong>{tl('settings.codexInstructions')}：</strong>
               <ol style={{ margin: '8px 0 0 20px', lineHeight: 1.8 }}>
-                <li>Windows: 将 config.toml 和 auth.json 放到 <code>%USERPROFILE%\.codex\</code> 目录</li>
-                <li>设置环境变量：<code>set OPENAI_API_KEY=sk-bridge-local</code></li>
+                <li>Windows: 将 config.toml 放到 <code>%USERPROFILE%\.codex\</code> 目录</li>
                 <li>确保本应用正在运行（代理状态：运行中）</li>
-                <li>命令行运行 <code>codex</code>，无需登录 OpenAI 即可直接使用</li>
+                <li>命令行运行 <code>codex</code> 或打开 Codex 桌面端</li>
+                <li>auth.json 必须保留官方登录态，切勿用占位 key 覆盖</li>
               </ol>
             </div>
           </>

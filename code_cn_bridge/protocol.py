@@ -236,6 +236,21 @@ class ResponseCache:
         用于续接对话时恢复缺失的 function_call 定义。
         """
         with self._lock:
+            # 调试：打印缓存中所有 function_call 的 call_id
+            all_fc_ids = []
+            for resp_data in self._cache.values():
+                for out_item in resp_data.get("output", []):
+                    if out_item.get("type") == "function_call":
+                        fc_id = out_item.get("call_id", "") or out_item.get("id", "")
+                        fc_name = out_item.get("name", "")
+                        all_fc_ids.append(f"{fc_id}({fc_name})")
+            if all_fc_ids:
+                _logger.info("find_tool_call 查找 %s，缓存中有 %d 个 function_call: %s",
+                    call_id, len(all_fc_ids), ", ".join(all_fc_ids))
+            else:
+                _logger.info("find_tool_call 查找 %s，缓存中无 function_call (共 %d 条响应)",
+                    call_id, len(self._cache))
+
             for resp_data in reversed(list(self._cache.values())):
                 for out_item in resp_data.get("output", []):
                     if out_item.get("type") == "function_call":
@@ -249,6 +264,31 @@ class ResponseCache:
                                     "arguments": out_item.get("arguments", ""),
                                 },
                             }
+        return None
+
+    def find_function_call_raw(self, call_id: str) -> dict | None:
+        """在所有缓存的响应中查找 function_call 项的原始 Responses API 字段
+
+        用于 previous_response_id 场景恢复缺失的工具调用字段
+        （参考 CC Switch v3.16.4 PR #4160）。
+
+        当 Codex 发起引用 previous_response_id 的后续 Chat 请求时，
+        input 中的 function_call 项可能只携带 call_id，留空了
+        name、arguments、status 等字段。本方法返回完整的原始字段供恢复。
+
+        Returns:
+            原始的 Responses API function_call 项（dict），包含：
+            - type, call_id, name, arguments, status, id 等所有字段
+            未找到返回 None
+        """
+        with self._lock:
+            for resp_data in reversed(list(self._cache.values())):
+                for out_item in resp_data.get("output", []):
+                    if out_item.get("type") == "function_call":
+                        tc_id = out_item.get("call_id", "") or out_item.get("id", "")
+                        if tc_id == call_id:
+                            # 返回原始项的副本，保留所有字段
+                            return dict(out_item)
         return None
 
     # 摘要大小限制，防止超大响应撑爆后续请求的上下文窗口
@@ -411,6 +451,16 @@ def translate_request(
         else:
             instructions = project_ctx
 
+    # 强制中文回复指令 —— 注入到 instructions 开头，确保模型始终用中文回答
+    _CHINESE_DIRECTIVE = (
+        "【重要】你必须始终使用简体中文回复用户，即使用户用英文提问或系统提示是英文。"
+        "代码注释也用中文。只有在编写代码本身时才使用英文。"
+    )
+    if instructions:
+        instructions = _CHINESE_DIRECTIVE + "\n\n" + instructions
+    else:
+        instructions = _CHINESE_DIRECTIVE
+
     if instructions:
         msg_content = instructions
         if cached_summaries:
@@ -451,7 +501,9 @@ def translate_request(
         chat_req["_include"] = include
 
     # ── store 字段 (控制是否写入 ResponseCache, server.py 使用) ─
-    chat_req["_store"] = responses_body.get("store", True)
+    # 强制始终缓存：Codex 桌面端发送 store=false，但我们需要缓存 function_call
+    # 定义以便续接对话时恢复缺失的 tool_call。不缓存会导致 400 错误。
+    chat_req["_store"] = True
 
     # ── parallel_tool_calls 透传 ────────────────────────────────
     if "parallel_tool_calls" in responses_body:
@@ -571,6 +623,11 @@ def translate_request(
         chat_req["tools"] = [t for t in normalized if t.get("function", {}).get("name", "").strip()]
         if has_image_gen:
             chat_req["_has_image_gen"] = True
+
+    # 传递 MCP 工具名称映射（由 _intercept_builtin_tools 展开后生成）
+    mcp_mapping = responses_body.get("_mcp_tool_mapping")
+    if mcp_mapping:
+        chat_req["_mcp_tool_mapping"] = mcp_mapping
 
     # tool_choice — 支持 "auto"、"none"、"required" 和精确指定
     tool_choice = responses_body.get("tool_choice")
@@ -707,33 +764,59 @@ def _map_input_to_messages(input_items: list[dict], tools: list[dict] | None = N
                 call_id, recovered.get("function", {}).get("name", ""))
             return True
         # 无法恢复：尝试从 tools 数组中推断函数名
-        # 如果 tools 中只有一个函数，直接使用；否则使用第一个函数名（带警告）
-        # 避免因占位符导致上游 400 错误，同时尽可能保留对话上下文
+        # 构建有效函数名集合，仅使用在 tools 中存在的函数名
+        # 注意：Codex 发送的是 Responses API 格式 (name 在顶层)，
+        # 而非 Chat API 格式 (name 在 function.name 里)，两种都要兼容
         if tools:
-            # 优先使用唯一函数名
-            if len(tools) == 1:
-                fn_name = tools[0].get("function", {}).get("name", "tool_call")
-            else:
-                fn_name = tools[0].get("function", {}).get("name", "tool_call")
-                _logger.warning(
-                    "无法确定 tool_call=%s 的函数名，从 tools 中推断为 %s（可能存在偏差）",
-                    call_id, fn_name,
-                )
-            known_tc_ids.add(call_id)
-            msg = {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "type": "function",
-                    "id": call_id,
-                    "function": {"name": fn_name, "arguments": "{}"},
-                }],
-            }
-            msg["reasoning_content"] = "Previous tool call."
-            messages.append(msg)
-            _logger.info("从 tools 推断恢复了缺失的 assistant(tool_calls): call_id=%s name=%s",
-                call_id, fn_name)
-            return True
+            valid_fn_names = set()
+            for t in tools:
+                # Responses API 格式: {"type": "function", "name": "shell", ...}
+                name = t.get("name", "")
+                if name:
+                    valid_fn_names.add(name)
+                # Chat API 格式: {"type": "function", "function": {"name": "shell"}}
+                fn = t.get("function", {})
+                if isinstance(fn, dict):
+                    name = fn.get("name", "")
+                    if name:
+                        valid_fn_names.add(name)
+            if valid_fn_names:
+                # 多候选时的优先级：shell > 其他常用工具 > 字母序第一个
+                # Codex 最常用 shell 工具，避免随机选择 view_image 等错误函数名
+                _PRIORITY_NAMES = ["shell", "exec", "run", "bash", "execute"]
+                fn_name = None
+                for prio in _PRIORITY_NAMES:
+                    if prio in valid_fn_names:
+                        fn_name = prio
+                        break
+                if not fn_name:
+                    fn_name = next(iter(valid_fn_names))
+                if len(valid_fn_names) > 1:
+                    _logger.warning(
+                        "无法确定 tool_call=%s 的函数名，从 tools 中推断为 %s（共 %d 个候选：%s）",
+                        call_id, fn_name, len(valid_fn_names),
+                        ", ".join(sorted(valid_fn_names)[:5]),
+                    )
+                known_tc_ids.add(call_id)
+                msg = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "type": "function",
+                        "id": call_id,
+                        "function": {"name": fn_name, "arguments": "{}"},
+                    }],
+                }
+                msg["reasoning_content"] = "Previous tool call."
+                messages.append(msg)
+                _logger.info("从 tools 推断恢复了缺失的 assistant(tool_calls): call_id=%s name=%s",
+                    call_id, fn_name)
+                return True
+            # tools 中没有有效函数名，无法推断
+            _logger.warning(
+                "无法从 tools 推断 tool_call=%s：tools 中无有效函数名 (tools=%d)",
+                call_id, len(tools),
+            )
         # 没有 tools 信息，也无法从缓存恢复，跳过该 function_call_output
         _logger.warning("无法从缓存恢复 tool_call=%s 且无 tools 信息，跳过该 function_call_output", call_id)
         return False
@@ -807,12 +890,32 @@ def _map_input_to_messages(input_items: list[dict], tools: list[dict] | None = N
 
         # function_call → 收集到 pending（合并连续多个为一条 assistant 消息）
         if item_type == "function_call":
+            call_id = item.get("call_id", "")
+            name = item.get("name", "")
+            arguments = item.get("arguments", "")
+
+            # previous_response_id 场景恢复（参考 CC Switch v3.16.4 PR #4160）：
+            # Codex 发起引用 previous_response_id 的后续请求时，function_call 项
+            # 可能只携带 call_id，留空 name/arguments/status 等字段。
+            # 此时从 ResponseCache 恢复完整的工具调用字段，让 Chat 上游能正确重建。
+            if (not name or not arguments) and call_id:
+                raw_fc = get_response_cache().find_function_call_raw(call_id)
+                if raw_fc:
+                    if not name:
+                        name = raw_fc.get("name", "")
+                    if not arguments:
+                        arguments = raw_fc.get("arguments", "")
+                    _logger.info(
+                        "previous_response_id 恢复 function_call 字段: call_id=%s, name=%s",
+                        call_id, name,
+                    )
+
             tc = {
                 "type": "function",
-                "id": item.get("call_id", ""),
+                "id": call_id,
                 "function": {
-                    "name": item.get("name", ""),
-                    "arguments": item.get("arguments", ""),
+                    "name": name,
+                    "arguments": arguments,
                 },
             }
             pending_tool_calls.append(tc)
@@ -858,6 +961,31 @@ def _map_input_to_messages(input_items: list[dict], tools: list[dict] | None = N
 
     # 恢复上一轮被 DeepSeek 丢弃的 reasoning_content
     _recover_reasoning(messages)
+
+    # 续接对话时，Codex 可能只发送 function_call_output 而没有 system/user 消息
+    # zhipu 等上游 API 要求第一条消息必须是 system 或 user，否则返回 400
+    # 此时在开头插入一个 user 占位消息，确保消息结构合法
+    if messages and messages[0].get("role") not in ("system", "user"):
+        messages.insert(0, {"role": "user", "content": "Continue."})
+        _logger.info("续接对话缺少 system/user 开头，已插入 user 占位消息")
+
+    # 调试日志：打印最终 messages 结构摘要（排查上游 400 错误）
+    summary = []
+    for i, m in enumerate(messages):
+        role = m.get("role", "?")
+        tc_count = len(m.get("tool_calls", []))
+        tc_names = [tc.get("function", {}).get("name", "") for tc in m.get("tool_calls", [])]
+        tc_ids = [tc.get("id", "")[:16] for tc in m.get("tool_calls", [])]
+        tcid = m.get("tool_call_id", "")[:16]
+        content_val = m.get("content", "")
+        content_len = len(str(content_val)) if content_val else 0
+        has_rc = "rc" if m.get("reasoning_content") else ""
+        # 对 tool 响应消息，显示内容前 200 字符（调试 MCP 工具返回值）
+        content_preview = ""
+        if role == "tool" and content_val:
+            content_preview = f" preview={str(content_val)[:200]!r}"
+        summary.append(f"  [{i}]{role}{' tc='+str(tc_count)+str(tc_names)+str(tc_ids) if tc_count else ''}{' tcid='+tcid if tcid else ''}{' content='+str(content_len) if content_len else ''}{content_preview}{' '+has_rc if has_rc else ''}")
+    _logger.info("translate_request 最终 messages (%d 条):\n%s", len(messages), "\n".join(summary))
 
     return messages
 
@@ -1287,6 +1415,8 @@ def translate_response(
     include_list: list[str] = chat_req.get("_include") if chat_req else None
     want_encrypted_reasoning = bool(include_list and "reasoning.encrypted_content" in include_list)
     metadata = chat_req.get("_metadata") if chat_req else None
+    # MCP 工具名称反向映射: "mcp__node_repl__js" → ("mcp__node_repl", "js")
+    mcp_mapping: dict[str, tuple[str, str]] = chat_req.get("_mcp_tool_mapping") if chat_req else None
 
     choices = chat_resp.get("choices", [])
     usage = chat_resp.get("usage", {})
@@ -1330,11 +1460,25 @@ def translate_response(
             call_id = tc.get("id", "")
             if isinstance(arguments, dict):
                 arguments = json.dumps(arguments, ensure_ascii=False)
+            # MCP 工具名称反向映射: 展开名 → Codex 注册名
+            # e.g. "mcp__node_repl__js" → "namespace__js" (Codex 期望的注册名)
+            if mcp_mapping and name in mcp_mapping:
+                _wrapper, _sub_name = mcp_mapping[name]
+                # namespace__ 前缀工具: mcp__node_repl__js → namespace__js
+                # Codex 客户端把 node_repl MCP 工具暴露为 namespace__ 前缀
+                # 但执行路由器期望 namespace__ 前缀，所以需要反向映射
+                if _wrapper == "mcp__node_repl":
+                    original_name = f"namespace__{_sub_name}"
+                    _logger.info("MCP 工具反向映射: %s → %s", name, original_name)
+                    name = original_name
             output_items.append(
                 make_function_call_output_item(name, arguments, call_id)
             )
 
-    responses_resp = build_responses_response(output_items, model, _normalize_usage(usage))
+    # 根据是否有工具调用决定响应状态
+    has_tool_calls = any(item.get("type") == "function_call" for item in output_items)
+    status = "requires_action" if has_tool_calls else "completed"
+    responses_resp = build_responses_response(output_items, model, _normalize_usage(usage), status=status)
 
     # 回显 metadata（不发送给上游，仅用于响应回显）
     if isinstance(metadata, dict):
@@ -1392,6 +1536,8 @@ class StreamTranslator:
         # 从 chat_req 读取内部控制字段
         self._reasoning_exclude = bool(chat_req.get("_reasoning_exclude")) if chat_req else False
         self._reasoning_generate_summary = chat_req.get("_reasoning_generate_summary") if chat_req else ""
+        # MCP 工具名称映射（展开名 → (包装器名, 子工具名)）
+        self._mcp_tool_mapping: dict[str, tuple[str, str]] = chat_req.get("_mcp_tool_mapping") if chat_req else None
         include_list = chat_req.get("_include") if chat_req else None
         self._want_encrypted_reasoning = bool(include_list and "reasoning.encrypted_content" in include_list)
         self._metadata = chat_req.get("_metadata") if chat_req else None
@@ -1836,6 +1982,13 @@ class StreamTranslator:
 
         # 名字事件（首次出现时）—— 仅记录，不发送 output_item.added
         if fn_name and not buf["name_done"]:
+            # MCP 工具名称反向映射: mcp__node_repl__js → namespace__js
+            if self._mcp_tool_mapping and fn_name in self._mcp_tool_mapping:
+                _wrapper, _sub_name = self._mcp_tool_mapping[fn_name]
+                if _wrapper == "mcp__node_repl":
+                    original_name = f"namespace__{_sub_name}"
+                    _logger.info("流式 MCP 工具反向映射: %s → %s", fn_name, original_name)
+                    fn_name = original_name
             buf["name"] = fn_name
             buf["name_done"] = True
             if buf["item_index"] < len(self._output_items):

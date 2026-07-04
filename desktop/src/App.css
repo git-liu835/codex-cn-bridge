@@ -711,3 +711,459 @@ input, select, textarea, button {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ═══════ Codex Unlock Page ═══════ */
+
+.page-container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.page-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 24px;
+  line-height: 1.6;
+}
+
+.status-card,
+.action-card,
+.guide-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.status-card-ok {
+  background: rgba(34, 197, 94, 0.05);
+  border: 1px solid var(--success);
+}
+
+.status-card-no {
+  background: rgba(239, 68, 68, 0.05);
+  border: 1px solid var(--error);
+}
+
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: var(--text-primary);
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.status-item.full {
+  grid-column: 1 / -1;
+}
+
+/* ═══ Codex 配置模式切换器 ═══ */
+.mode-switcher-card {
+  margin-bottom: 16px;
+}
+
+.mode-switcher-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mode-current {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mode-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.mode-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mode-badge.mode-official {
+  background: rgba(46, 204, 113, 0.15);
+  color: #2ecc71;
+  border: 1px solid rgba(46, 204, 113, 0.3);
+}
+
+.mode-badge.mode-bridge {
+  background: rgba(52, 152, 219, 0.15);
+  color: #3498db;
+  border: 1px solid rgba(52, 152, 219, 0.3);
+}
+
+.mode-badge.mode-unknown {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.auth-status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.auth-success {
+  background: rgba(46, 204, 113, 0.1);
+  color: #2ecc71;
+}
+
+.auth-error {
+  background: rgba(231, 76, 60, 0.1);
+  color: #e74c3c;
+}
+
+.auth-warn {
+  background: rgba(241, 196, 15, 0.1);
+  color: #f1c40f;
+}
+
+.mode-desc {
+  font-size: 12px;
+  margin: 0;
+}
+
+.mode-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.mode-buttons .btn {
+  min-width: 90px;
+}
+
+.btn-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-active:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-active:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.mode-msg {
+  font-size: 12px;
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.mode-msg.success {
+  color: #2ecc71;
+}
+
+.mode-msg.error {
+  color: #e74c3c;
+}
+
+.mode-msg.warn {
+  color: #f1c40f;
+}
+
+.status-label {
+  color: var(--text-secondary);
+  min-width: 80px;
+}
+
+.status-value {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.status-value.ok { color: var(--success); }
+.status-value.no { color: var(--text-muted); }
+.status-value.error { color: var(--error); }
+.status-value.path {
+  font-family: monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+}
+
+.action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: var(--bg-primary);
+}
+
+.btn-toggle {
+  background: var(--bg-primary);
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.alert {
+  padding: 12px 16px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.alert-success {
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid var(--success);
+  color: var(--success);
+}
+
+.alert-error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid var(--error);
+  color: var(--error);
+}
+
+.alert-info {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid #3b82f6;
+  color: #3b82f6;
+}
+
+.alert-warning {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid var(--warning);
+  color: var(--warning);
+}
+
+.guide-list {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-secondary);
+}
+
+.guide-list li {
+  margin-bottom: 8px;
+}
+
+.guide-list code {
+  background: var(--bg-primary);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+/* ═══════ Codex 官方状态卡（Models 页面顶部）═══════ */
+
+.codex-status-card {
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+
+.codex-status-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.codex-logo {
+  font-size: 20px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.codex-title-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.codex-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.codex-mode-badge {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.codex-mode-badge.mode-official {
+  background: rgba(91, 141, 239, 0.15);
+  color: var(--accent);
+}
+.codex-mode-badge.mode-bridge {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--success);
+}
+.codex-mode-badge.mode-unknown {
+  background: rgba(107, 112, 148, 0.15);
+  color: var(--text-muted);
+}
+
+.codex-status-badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-chip {
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.status-chip.ok {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--success);
+}
+.status-chip.err {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--error);
+}
+.status-chip.warn {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--warning);
+}
+
+.codex-guide {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.codex-guide.error {
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  color: var(--error);
+}
+.codex-guide.warn {
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  color: var(--warning);
+}
+.guide-link {
+  margin-left: 8px;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.codex-mode-switch {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mode-msg-inline {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.mode-msg-inline.success { color: var(--success); }
+.mode-msg-inline.error { color: var(--error); }
+
+.codex-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--warning);
+  line-height: 1.5;
+}
+
+/* ═══════ 预设信息展示框（添加卡片 Modal）═══════ */
+
+.preset-info-box {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.preset-info-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.preset-info-row:last-child { margin-bottom: 0; }
+
+.preset-info-label {
+  color: var(--text-muted);
+  min-width: 70px;
+}
+
+.preset-info-box code {
+  color: var(--accent);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}

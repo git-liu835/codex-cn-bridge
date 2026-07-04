@@ -1,12 +1,17 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, shell } from 'electron';
-import { autoUpdater } from 'electron-updater';
 import { spawn, execSync, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 
+// electron-updater 可选加载（避免模块缺失导致崩溃）
+let autoUpdater: any = null;
+try { autoUpdater = require('electron-updater').autoUpdater; } catch { /* optional */ }
+
 // 禁用自动下载，由用户决定是否更新
-autoUpdater.autoDownload = false;
-autoUpdater.allowDowngrade = false;
+if (autoUpdater) {
+  autoUpdater.autoDownload = false;
+  autoUpdater.allowDowngrade = false;
+}
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -95,15 +100,19 @@ function startBridgeProcess() {
   });
 
   bridgeProcess.stdout?.on('data', (data: Buffer) => {
-    const text = data.toString();
-    console.log(`[Bridge] ${text.trim()}`);
-    mainWindow?.webContents.send('bridge-log', { level: 'info', text: text.trim() });
+    const text = data.toString().trim();
+    try {
+      console.log(`[Bridge] ${text}`);
+    } catch { /* EPIPE when parent pipe closed */ }
+    try { mainWindow?.webContents.send('bridge-log', { level: 'info', text }); } catch { /* window gone */ }
   });
 
   bridgeProcess.stderr?.on('data', (data: Buffer) => {
-    const text = data.toString();
-    console.error(`[Bridge Error] ${text.trim()}`);
-    mainWindow?.webContents.send('bridge-log', { level: 'error', text: text.trim() });
+    const text = data.toString().trim();
+    try {
+      console.error(`[Bridge Error] ${text}`);
+    } catch { /* EPIPE when parent pipe closed */ }
+    try { mainWindow?.webContents.send('bridge-log', { level: 'error', text }); } catch { /* window gone */ }
   });
 
   bridgeProcess.on('close', (code: number | null) => {
@@ -354,6 +363,7 @@ ipcMain.handle('open-external', async (_event, url: string) => {
 
 ipcMain.handle('check-for-updates', async () => {
   if (isDev) return { status: 'dev-mode' };
+  if (!autoUpdater) return { status: 'error', message: 'electron-updater 模块不可用' };
   try {
     const mirror = getUpdateMirror();
     if (mirror) {
@@ -431,8 +441,12 @@ function setupAutoUpdater() {
     console.log('[AutoUpdater] Skipping update check in dev mode');
     return;
   }
+  if (!autoUpdater) {
+    console.log('[AutoUpdater] electron-updater not available, skipping');
+    return;
+  }
 
-  autoUpdater.on('update-available', (info) => {
+  autoUpdater.on('update-available', (info: any) => {
     console.log('[AutoUpdater] Update available:', info.version);
     dialog.showMessageBox(mainWindow!, {
       type: 'info',
@@ -450,7 +464,7 @@ function setupAutoUpdater() {
     });
   });
 
-  autoUpdater.on('download-progress', (progress) => {
+  autoUpdater.on('download-progress', (progress: any) => {
     mainWindow?.webContents.send('update-status', {
       status: 'downloading',
       percent: Math.floor(progress.percent),
@@ -478,7 +492,7 @@ function setupAutoUpdater() {
     mainWindow?.webContents.send('update-status', { status: 'up-to-date' });
   });
 
-  autoUpdater.on('error', (err) => {
+  autoUpdater.on('error', (err: any) => {
     console.error('[AutoUpdater] Error:', err.message);
     const detail = [err.message];
     if ((err as any).stack) detail.push('Stack: ' + (err as any).stack);
