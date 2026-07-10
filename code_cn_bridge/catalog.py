@@ -539,11 +539,15 @@ def _add_bridge_fields(content: str, endpoint: str, default_model: str | None) -
         top_block_lines.append('model_reasoning_effort = "medium"')
 
     # 桥接器 provider 段
+    # 使用 experimental_bearer_token 而非 env_key：
+    # Codex 对 env_key 会强制读取系统环境变量，桌面端一切换仍会报
+    # Missing environment variable: OPENAI_API_KEY。本地代理不校验 Key，
+    # 直接写入占位 token 即可一键生效。
     section_block_lines = [
         f"[model_providers.{BRIDGE_PROVIDER_NAME}]",
         f'name = "Code CN Bridge"',
         f'base_url = "{endpoint}"',
-        f'env_key = "OPENAI_API_KEY"',
+        f'experimental_bearer_token = "sk-bridge-local"',
         f'wire_api = "responses"',
         f'requires_openai_auth = false',
         f'supports_websockets = false',
@@ -603,6 +607,106 @@ def _add_bridge_fields(content: str, endpoint: str, default_model: str | None) -
     return "".join(new_lines)
 
 
+def _ensure_bridge_auth_json() -> None:
+    """确保 ~/.codex/auth.json 含占位 OPENAI_API_KEY。
+
+    - 文件不存在 → 创建占位文件
+    - 已有官方 OAuth tokens → 不动（保留登录态）
+    - 存在但缺少 OPENAI_API_KEY（incomplete）→ 补上占位 Key
+    """
+    import json
+
+    auth_path = CODEX_HOME / "auth.json"
+    if not auth_path.exists():
+        auth_path.write_text(
+            json.dumps({"OPENAI_API_KEY": "sk-bridge-local"}, indent=2),
+            encoding="utf-8",
+        )
+        _logger.info("自动创建占位 auth.json（免登录）: %s", auth_path)
+        return
+
+    try:
+        auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        _logger.warning("读取 auth.json 失败，跳过补丁: %s", e)
+        return
+
+    if not isinstance(auth_data, dict):
+        return
+
+    # 已有官方登录态则保留
+    if any(k in auth_data for k in ("tokens", "account_id", "id_token", "access_token")):
+        return
+
+    if auth_data.get("OPENAI_API_KEY"):
+        return
+
+    auth_data["OPENAI_API_KEY"] = "sk-bridge-local"
+    auth_path.write_text(json.dumps(auth_data, indent=2), encoding="utf-8")
+    _logger.info("已向 incomplete auth.json 补入占位 OPENAI_API_KEY")
+
+
+def _ensure_openai_api_key_user_env() -> None:
+    """写入用户级 OPENAI_API_KEY，兼容仍检查环境变量的旧版 Codex。
+
+    仅在变量未设置时写入占位值；不覆盖用户已有的真实 Key。
+    Windows 通过注册表用户环境变量；其他平台写入当前进程（提示用户自行 export）。
+    """
+    import os
+
+    existing = os.environ.get("OPENAI_API_KEY", "").strip()
+    if existing:
+        return
+
+    placeholder = "sk-bridge-local"
+    os.environ["OPENAI_API_KEY"] = placeholder
+
+    if os.name == "nt":
+        try:
+            import winreg
+            import ctypes
+
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Environment",
+                0,
+                winreg.KEY_READ | winreg.KEY_SET_VALUE,
+            )
+            try:
+                try:
+                    current, _ = winreg.QueryValueEx(key, "OPENAI_API_KEY")
+                    if isinstance(current, str) and current.strip():
+                        return
+                except FileNotFoundError:
+                    pass
+
+                winreg.SetValueEx(key, "OPENAI_API_KEY", 0, winreg.REG_SZ, placeholder)
+            finally:
+                winreg.CloseKey(key)
+
+            # 通知其他进程环境变量已变更（已打开的程序仍需重启）
+            HWND_BROADCAST = 0xFFFF
+            WM_SETTINGCHANGE = 0x001A
+            SMTO_ABORTIFHUNG = 0x0002
+            ctypes.windll.user32.SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                "Environment",
+                SMTO_ABORTIFHUNG,
+                5000,
+                None,
+            )
+            _logger.info("已写入用户环境变量 OPENAI_API_KEY=sk-bridge-local")
+        except Exception as e:
+            _logger.warning("写入 Windows 用户环境变量失败: %s", e)
+    else:
+        _logger.info(
+            "已在当前进程设置 OPENAI_API_KEY；若 Codex 仍报缺 Key，"
+            "请在 shell 中 export OPENAI_API_KEY=sk-bridge-local"
+        )
+
+
 def switch_codex_mode(mode: str) -> dict:
     """切换 Codex 配置模式（参考 CC Switch 的配置切换器）
 
@@ -649,16 +753,10 @@ def switch_codex_mode(mode: str) -> dict:
         msg = "已切换到官方模式：移除桥接器 provider/catalog/model 字段"
 
     elif mode == "bridge":
-        # auth.json 不存在时自动生成最小占位文件（免 ChatGPT 登录）
-        # 仅当 auth.json 不存在时才创建，已有官方登录态则保留
-        auth_path = CODEX_HOME / "auth.json"
-        if not auth_path.exists():
-            import json
-            auth_path.write_text(
-                json.dumps({"OPENAI_API_KEY": "sk-bridge-local"}, indent=2),
-                encoding="utf-8",
-            )
-            _logger.info("自动创建占位 auth.json（免登录）: %s", auth_path)
+        # 确保 auth.json 有占位 Key；已有官方 OAuth 登录态则保留不动
+        _ensure_bridge_auth_json()
+        # 兼容仍读取 env_key / 系统环境变量的旧版 Codex：写入用户级 OPENAI_API_KEY
+        _ensure_openai_api_key_user_env()
 
         # 生成 catalog 文件
         try:
@@ -688,7 +786,11 @@ def switch_codex_mode(mode: str) -> dict:
         # 先移除旧的桥接器字段（避免重复），再添加新的
         cleaned = _remove_bridge_fields(content)
         new_content = _add_bridge_fields(cleaned, endpoint, default_model)
-        msg = f"已切换到桥接器模式：provider={BRIDGE_PROVIDER_NAME}, model={default_model}, endpoint={endpoint}"
+        msg = (
+            f"已切换到桥接器模式：provider={BRIDGE_PROVIDER_NAME}, "
+            f"model={default_model}, endpoint={endpoint}。"
+            f"请完全退出并重新打开 Codex 后生效"
+        )
 
     else:
         return {
