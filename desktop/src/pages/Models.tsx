@@ -73,6 +73,7 @@ const Models: React.FC = () => {
   const [presets, setPresets] = useState<Array<{
     name: string; label: string; adapter: string; base_url: string;
     api_key_env: string; docs_url: string; models: string[];
+    region: 'domestic' | 'overseas' | 'local';
   }>>([]);
   const [selectedPresetName, setSelectedPresetName] = useState<string>('');
   const [switchingMode, setSwitchingMode] = useState(false);
@@ -298,8 +299,9 @@ const Models: React.FC = () => {
               <span className={`status-chip ${codexStatus.codex_installed ? 'ok' : 'err'}`}>
                 {codexStatus.codex_installed ? '✓ 已安装' : '✗ 未安装'}
               </span>
-              <span className={`status-chip ${codexStatus.auth_status === 'valid' ? 'ok' : 'warn'}`}>
+              <span className={`status-chip ${codexStatus.auth_status === 'valid' || codexStatus.auth_status === 'bridge-managed' ? 'ok' : 'warn'}`}>
                 {codexStatus.auth_status === 'valid' ? '✓ 已登录' :
+                  codexStatus.auth_status === 'bridge-managed' ? '✓ 免登录' :
                   codexStatus.auth_status === 'missing' ? '未登录' :
                   codexStatus.auth_status === 'corrupted' ? '登录态损坏' : '登录态异常'}
               </span>
@@ -315,7 +317,7 @@ const Models: React.FC = () => {
               </a>
             </div>
           )}
-          {codexStatus.codex_installed && codexStatus.auth_status !== 'valid' && (
+          {codexStatus.codex_installed && codexStatus.auth_status !== 'valid' && codexStatus.auth_status !== 'bridge-managed' && (
             <div className="codex-guide warn">
               {codexStatus.auth_guide}
             </div>
@@ -342,11 +344,47 @@ const Models: React.FC = () => {
             {switchingMode && <span className="mode-msg-inline">切换中...</span>}
             {modeMsg && <span className={`mode-msg-inline ${modeMsg.includes('失败') ? 'error' : 'success'}`}>{modeMsg}</span>}
           </div>
-          {codexStatus.mode === 'bridge' && codexStatus.auth_status !== 'valid' && (
+          {codexStatus.mode === 'bridge' && codexStatus.auth_status !== 'valid' && codexStatus.auth_status !== 'bridge-managed' && (
             <p className="codex-hint">
               ⚠ 桥接器模式下若没有官方登录态，Codex 桌面端会隐藏自定义模型和插件。请先用 ChatGPT 账号登录 Codex。
             </p>
           )}
+        </div>
+      )}
+
+      {/* ── 厂商预设卡片网格（点击即可快速配置） ──── */}
+      {presets.length > 0 && (
+        <div className="preset-grid-section">
+          <h3 className="preset-section-title">厂商快速配置</h3>
+          <div className="preset-card-grid">
+            {presets.map(p => {
+              const isConfigured = models.some(m => m.provider === p.name);
+              return (
+                <div
+                  key={p.name}
+                  className={`preset-card ${isConfigured ? 'configured' : ''} region-${p.region}`}
+                  onClick={() => { openCardForm(); handlePresetChange(p.name); }}
+                >
+                  <div className="preset-card-header">
+                    <span className="preset-card-name">{p.label}</span>
+                    {isConfigured && <span className="preset-configured-badge">✓</span>}
+                  </div>
+                  <div className="preset-card-models">
+                    {p.models.slice(0, 3).map(m => (
+                      <span key={m} className="preset-model-tag">{m}</span>
+                    ))}
+                    {p.models.length > 3 && <span className="preset-model-more">+{p.models.length - 3}</span>}
+                  </div>
+                  <div className="preset-card-footer">
+                    <span className={`preset-region-tag region-${p.region}`}>
+                      {p.region === 'domestic' ? '国内' : p.region === 'overseas' ? '国外' : '本地'}
+                    </span>
+                    {p.docs_url && <span className="preset-docs-link">申请 Key →</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

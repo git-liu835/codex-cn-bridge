@@ -1167,3 +1167,141 @@ input, select, textarea, button {
   color: var(--accent);
   font-family: 'SF Mono', 'Fira Code', monospace;
 }
+
+/* ═══ 厂商预设卡片网格 ═══════════════════════════ */
+.preset-grid-section {
+  margin-top: 16px;
+}
+
+.preset-section-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.preset-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.preset-card {
+  position: relative;
+  padding: 12px 12px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
+  user-select: none;
+}
+
+.preset-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  transform: translateY(-1px);
+}
+
+.preset-card:active {
+  transform: translateY(0);
+}
+
+.preset-card.configured {
+  border-color: var(--accent);
+  background: linear-gradient(0deg, rgba(var(--accent-rgb, 22, 119, 235), 0.04), rgba(var(--accent-rgb, 22, 119, 235), 0.04)), var(--bg-card);
+}
+
+/* 区域分类的左边框色条 */
+.preset-card.region-domestic { border-left: 3px solid #1677ff; }
+.preset-card.region-overseas { border-left: 3px solid #722ed1; }
+.preset-card.region-local    { border-left: 3px solid #52c41a; }
+
+.preset-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.preset-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.preset-configured-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: 11px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 50%;
+}
+
+.preset-card-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+  min-height: 22px;
+}
+
+.preset-model-tag {
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.preset-model-more {
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.preset-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+.preset-region-tag {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.preset-region-tag.region-domestic {
+  color: #1677ff;
+  background: rgba(22, 119, 255, 0.1);
+}
+.preset-region-tag.region-overseas {
+  color: #722ed1;
+  background: rgba(114, 46, 209, 0.1);
+}
+.preset-region-tag.region-local {
+  color: #52c41a;
+  background: rgba(82, 196, 26, 0.1);
+}
+
+.preset-docs-link {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.preset-card:hover .preset-docs-link {
+  color: var(--accent);
+}

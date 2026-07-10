@@ -37,7 +37,7 @@ async def get_status():
         "running": True,
         "host": cfg.server_host,
         "port": cfg.server_port,
-        "version": "0.5.0",
+        "version": "0.6.0",
         "stats": stats.get_summary(),
     }
 
@@ -427,27 +427,33 @@ async def test_connection(alias: str, data: dict | None = None):
     if not api_key:
         return {"status": "error", "message": "API Key 未设置"}
 
-    # 临时覆盖 base_url
-    if data and data.get("base_url"):
-        adapter.base_url = data["base_url"]
-    elif provider.get("base_url"):
-        adapter.base_url = provider["base_url"]
-
-    # 构建两种测试请求
-    headers = adapter.get_headers(api_key)
-
-    # 先尝试 chat 端点
-    chat_url = adapter.build_chat_url()
-    chat_body = adapter.preprocess_chat_request({
-        "model": target,
-        "messages": [{"role": "user", "content": "Hi"}],
-        "max_tokens": 5,
-        "stream": False,
-    })
-
-    start = time.time()
+    # 保存原始 base_url 以避免单例副作用
+    original_base_url = adapter.base_url
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15)) as client:
+        if data and data.get("base_url"):
+            adapter.base_url = data["base_url"]
+        elif provider.get("base_url"):
+            adapter.base_url = provider["base_url"]
+
+        # 构建测试请求头（加 User-Agent 避免 WAF 拦截）
+        headers = adapter.get_headers(api_key)
+        headers.setdefault("User-Agent", "code-cn-bridge/0.6.0")
+        # 应用 provider 配置的 extra_headers
+        for k, v in (provider.get("extra_headers") or {}).items():
+            headers[k] = v
+
+        # 先尝试 chat 端点
+        chat_url = adapter.build_chat_url()
+        chat_body = adapter.preprocess_chat_request({
+            "model": target,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 5,
+            "stream": False,
+        })
+
+        start = time.time()
+        # trust_env=False 绕过系统代理，与实际请求保持一致
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15), trust_env=False) as client:
             resp = await client.post(chat_url, json=chat_body, headers=headers)
             elapsed = (time.time() - start) * 1000
 
@@ -493,6 +499,8 @@ async def test_connection(alias: str, data: dict | None = None):
         return {"status": "error", "message": "连接超时（15秒）"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
+    finally:
+        adapter.base_url = original_base_url
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -936,9 +944,9 @@ async def export_codex_auth():
                     k in auth_data
                     for k in ("tokens", "account_id", "id_token", "access_token")
                 ) if isinstance(auth_data, dict) else False
-                # 检测是否被旧的占位 key 覆盖（项目历史遗留问题）
+                # bridge 自动生成的占位 auth（免登录模式）
                 if isinstance(auth_data, dict) and auth_data.get("OPENAI_API_KEY") == "sk-bridge-local":
-                    auth_status = "corrupted"  # 被占位 key 覆盖，需要重新登录
+                    auth_status = "bridge-managed"
                 elif has_official_token:
                     auth_status = "valid"
                 else:
@@ -982,16 +990,14 @@ def _build_auth_instructions(auth_status: str) -> list[str]:
             "2. 打开 Codex 桌面端，自定义模型应可见且插件可用",
             "警告：切勿用任何工具覆盖 auth.json，否则插件功能会失效",
         ]
-    if auth_status == "corrupted":
+    if auth_status == "bridge-managed":
         return [
-            "✗ 检测到 auth.json 被占位 key (sk-bridge-local) 覆盖，这正是插件失效的根因",
-            "修复步骤：",
-            "1. 完全退出 Codex 桌面端（任务栏托盘右键 exit）",
-            "2. 删除 ~/.codex/auth.json",
-            "3. 打开 Codex 桌面端，使用 ChatGPT 账号登录一次（建立官方登录态）",
-            "4. 登录后完全退出 Codex（托盘 exit）",
-            "5. 启动 bridge 桌面应用，重新生成 config.toml（不会动 auth.json）",
-            "6. 打开 Codex 桌面端，自定义模型和插件都应可用",
+            "✓ 桥接器免登录模式：auth.json 由 Bridge 自动生成（占位 key）",
+            "✓ 无需 ChatGPT 登录即可使用国产模型",
+            "✓ 模型请求走 bridge 协议转换，基础对话和工具调用均可用",
+            "如需使用官方专属插件（computer_use/web_search 等）：",
+            "  1. 用 ChatGPT 账号登录 Codex 一次（覆盖占位 auth.json）",
+            "  2. 登录后官方登录态会保留，插件功能即可启用",
         ]
     if auth_status == "missing":
         return [
@@ -1034,7 +1040,7 @@ async def get_codex_mode_endpoint():
                 auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
                 if isinstance(auth_data, dict):
                     if auth_data.get("OPENAI_API_KEY") == "sk-bridge-local":
-                        auth_status = "corrupted"
+                        auth_status = "bridge-managed"
                     elif any(k in auth_data for k in ("tokens", "account_id", "id_token", "access_token")):
                         auth_status = "valid"
                     else:
@@ -1104,6 +1110,7 @@ def _mode_description(mode: str) -> str:
 #   docs_url:    API Key 申请文档
 #   models:      推荐模型列表（target_model）
 _PROVIDER_PRESETS: list[dict] = [
+    # ═══ 国内厂商 ═══
     {
         "name": "deepseek",
         "label": "DeepSeek 深度求索",
@@ -1111,7 +1118,8 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://api.deepseek.com",
         "api_key_env": "DEEPSEEK_API_KEY",
         "docs_url": "https://platform.deepseek.com/api_keys",
-        "models": ["deepseek-v4", "deepseek-v4-pro", "deepseek-reasoner"],
+        "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4"],
+        "region": "domestic",
     },
     {
         "name": "zhipu",
@@ -1120,7 +1128,8 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "api_key_env": "ZHIPU_API_KEY",
         "docs_url": "https://open.bigmodel.cn/usercenter/apikeys",
-        "models": ["glm-5", "glm-5.1", "glm-5.2", "glm-4-plus"],
+        "models": ["glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash"],
+        "region": "domestic",
     },
     {
         "name": "qwen",
@@ -1129,7 +1138,8 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "api_key_env": "QWEN_API_KEY",
         "docs_url": "https://bailian.console.aliyun.com/?apiKey=1#/api-key",
-        "models": ["qwen3-coder-plus", "qwen3.7-max", "qwen3.7-plus"],
+        "models": ["qwen3-coder-plus", "qwen3-coder-next", "qwen3.5-max", "qwen3-max"],
+        "region": "domestic",
     },
     {
         "name": "kimi",
@@ -1138,7 +1148,8 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://api.moonshot.cn/v1",
         "api_key_env": "KIMI_API_KEY",
         "docs_url": "https://platform.moonshot.cn/console/api-keys",
-        "models": ["kimi-k2-6", "kimi-k2-7-code"],
+        "models": ["kimi-k2.6", "kimi-k2.5", "kimi-k2"],
+        "region": "domestic",
     },
     {
         "name": "doubao",
@@ -1147,7 +1158,8 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
         "api_key_env": "ARK_API_KEY",
         "docs_url": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
-        "models": ["doubao-pro-1-5", "doubao-seed-1-8", "doubao-seed-2-0"],
+        "models": ["doubao-seed-2.0", "doubao-seed-1.8", "doubao-5.0-pro"],
+        "region": "domestic",
     },
     {
         "name": "ernie",
@@ -1157,6 +1169,7 @@ _PROVIDER_PRESETS: list[dict] = [
         "api_key_env": "ERNIE_API_KEY",
         "docs_url": "https://console.bce.baidu.com/qianfan/ais/console/applicationConsole/application",
         "models": ["ernie-5.1", "ernie-speed-pro-128k"],
+        "region": "domestic",
     },
     {
         "name": "hunyuan",
@@ -1166,6 +1179,7 @@ _PROVIDER_PRESETS: list[dict] = [
         "api_key_env": "HUNYUAN_API_KEY",
         "docs_url": "https://console.cloud.tencent.com/hunyuan/api-key",
         "models": ["hunyuan-pro", "hunyuan-turbo"],
+        "region": "domestic",
     },
     {
         "name": "minimax",
@@ -1174,7 +1188,8 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://api.minimaxi.com/v1",
         "api_key_env": "MINIMAX_API_KEY",
         "docs_url": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
-        "models": ["MiniMax-M2.7", "MiniMax-M3"],
+        "models": ["MiniMax-M3", "MiniMax-M2.7"],
+        "region": "domestic",
     },
     {
         "name": "siliconflow",
@@ -1183,7 +1198,8 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://api.siliconflow.cn/v1",
         "api_key_env": "SILICONFLOW_API_KEY",
         "docs_url": "https://cloud.siliconflow.cn/account/ak",
-        "models": ["deepseek-ai/DeepSeek-V4", "Qwen/Qwen3.7-Max"],
+        "models": ["deepseek-ai/DeepSeek-V4", "Qwen/Qwen3-Coder-Next", "zhipuai/GLM-5.2"],
+        "region": "domestic",
     },
     {
         "name": "spark",
@@ -1192,7 +1208,28 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://spark-api-open.xf-yun.com/v1",
         "api_key_env": "SPARK_API_KEY",
         "docs_url": "https://console.xfyun.cn/services/bm4",
-        "models": ["spark-max", "spark-pro"],
+        "models": ["spark-v4.5", "spark-max", "spark-pro"],
+        "region": "domestic",
+    },
+    {
+        "name": "baichuan",
+        "label": "百川 Baichuan",
+        "adapter": "baichuan",
+        "base_url": "https://api.baichuan-ai.com/v1",
+        "api_key_env": "BAICHUAN_API_KEY",
+        "docs_url": "https://platform.baichuan-ai.com/console/apikey",
+        "models": ["Baichuan-4-Turbo", "Baichuan-4-Air"],
+        "region": "domestic",
+    },
+    {
+        "name": "step",
+        "label": "阶跃星辰 Step",
+        "adapter": "step",
+        "base_url": "https://api.stepfun.com/v1",
+        "api_key_env": "STEP_API_KEY",
+        "docs_url": "https://platform.stepfun.com/interface-key",
+        "models": ["step-3", "step-2-16k"],
+        "region": "domestic",
     },
     {
         "name": "agnes",
@@ -1201,8 +1238,81 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://apihub.agnes-ai.com/v1",
         "api_key_env": "AGNES_API_KEY",
         "docs_url": "",
-        "models": ["agnes-1.5-flash", "agnes-2.0-flash", "agnes-image-2.1-flash", "agnes-video-v2.0"],
+        "models": ["agnes-2.0-flash", "agnes-1.5-flash", "agnes-image-2.1-flash", "agnes-video-v2.0"],
+        "region": "domestic",
     },
+    # ═══ 国外厂商 ═══
+    {
+        "name": "openai",
+        "label": "OpenAI",
+        "adapter": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "docs_url": "https://platform.openai.com/api-keys",
+        "models": ["gpt-5.4", "gpt-5", "gpt-5-codex", "o3-pro"],
+        "region": "overseas",
+    },
+    {
+        "name": "anthropic",
+        "label": "Anthropic Claude",
+        "adapter": "anthropic",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "docs_url": "https://console.anthropic.com/settings/keys",
+        "models": ["claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
+        "region": "overseas",
+    },
+    {
+        "name": "google",
+        "label": "Google Gemini",
+        "adapter": "google",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "api_key_env": "GOOGLE_API_KEY",
+        "docs_url": "https://aistudio.google.com/app/apikey",
+        "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
+        "region": "overseas",
+    },
+    {
+        "name": "xai",
+        "label": "xAI Grok",
+        "adapter": "xai",
+        "base_url": "https://api.x.ai/v1",
+        "api_key_env": "XAI_API_KEY",
+        "docs_url": "https://console.x.ai",
+        "models": ["grok-4", "grok-4-fast", "grok-3"],
+        "region": "overseas",
+    },
+    {
+        "name": "mistral",
+        "label": "Mistral AI",
+        "adapter": "mistral",
+        "base_url": "https://api.mistral.ai/v1",
+        "api_key_env": "MISTRAL_API_KEY",
+        "docs_url": "https://console.mistral.ai/api-keys",
+        "models": ["mistral-large-2", "codestral-25.01", "mistral-small"],
+        "region": "overseas",
+    },
+    {
+        "name": "groq",
+        "label": "Groq 极速推理",
+        "adapter": "groq",
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "docs_url": "https://console.groq.com/keys",
+        "models": ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
+        "region": "overseas",
+    },
+    {
+        "name": "openrouter",
+        "label": "OpenRouter 聚合",
+        "adapter": "openrouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "docs_url": "https://openrouter.ai/keys",
+        "models": ["anthropic/claude-opus-4.5", "openai/gpt-5.4", "google/gemini-2.5-pro"],
+        "region": "overseas",
+    },
+    # ═══ 本地部署 ═══
     {
         "name": "ollama",
         "label": "Ollama 本地",
@@ -1210,7 +1320,18 @@ _PROVIDER_PRESETS: list[dict] = [
         "base_url": "http://localhost:11434/v1",
         "api_key_env": "OLLAMA_API_KEY",
         "docs_url": "https://ollama.com/download",
-        "models": ["qwen3:latest", "deepseek-v3:latest", "llama3:latest"],
+        "models": ["qwen3:latest", "deepseek-v4:latest", "llama3:latest"],
+        "region": "local",
+    },
+    {
+        "name": "lmstudio",
+        "label": "LM Studio 本地",
+        "adapter": "lmstudio",
+        "base_url": "http://localhost:1234/v1",
+        "api_key_env": "LMSTUDIO_API_KEY",
+        "docs_url": "https://lmstudio.ai",
+        "models": ["local-model"],
+        "region": "local",
     },
 ]
 
@@ -1248,7 +1369,7 @@ async def get_codex_status():
             auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
             if isinstance(auth_data, dict):
                 if auth_data.get("OPENAI_API_KEY") == "sk-bridge-local":
-                    auth_status = "corrupted"
+                    auth_status = "bridge-managed"
                 elif any(k in auth_data for k in ("tokens", "account_id", "id_token", "access_token")):
                     auth_status = "valid"
                 else:
@@ -1268,8 +1389,8 @@ async def get_codex_status():
         "mode": mode,
         "download_url": "https://chatgpt.com/codex",
         "auth_guide": (
-            "打开 Codex 桌面端 → 使用 ChatGPT 账号登录（不要用 API Key 登录），"
-            "登录成功后会自动写入 ~/.codex/auth.json"
+            "桥接器模式下无需 ChatGPT 登录，切换到桥接器模式时会自动生成 auth.json。"
+            "如需使用官方插件（computer_use 等），可用 ChatGPT 账号登录 Codex 覆盖占位文件。"
         ),
     }
 

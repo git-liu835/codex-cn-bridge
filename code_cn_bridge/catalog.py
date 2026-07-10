@@ -617,12 +617,18 @@ def switch_codex_mode(mode: str) -> dict:
     """
     config_path = CODEX_HOME / "config.toml"
 
+    # 确保 ~/.codex 目录存在
+    CODEX_HOME.mkdir(parents=True, exist_ok=True)
+
+    # config.toml 不存在时创建最小配置（新用户无需手动安装 Codex 也能用）
     if not config_path.exists():
-        return {
-            "success": False,
-            "mode": mode,
-            "message": f"config.toml 不存在: {config_path}",
-        }
+        config_path.write_text(
+            '# Codex 配置 - 由 Code CN Bridge 自动创建\n'
+            'service_tier = "default"\n\n'
+            '[features]\n',
+            encoding="utf-8",
+        )
+        _logger.info("自动创建 config.toml: %s", config_path)
 
     try:
         content = config_path.read_text(encoding="utf-8")
@@ -638,6 +644,17 @@ def switch_codex_mode(mode: str) -> dict:
         msg = "已切换到官方模式：移除桥接器 provider/catalog/model 字段"
 
     elif mode == "bridge":
+        # auth.json 不存在时自动生成最小占位文件（免 ChatGPT 登录）
+        # 仅当 auth.json 不存在时才创建，已有官方登录态则保留
+        auth_path = CODEX_HOME / "auth.json"
+        if not auth_path.exists():
+            import json
+            auth_path.write_text(
+                json.dumps({"OPENAI_API_KEY": "sk-bridge-local"}, indent=2),
+                encoding="utf-8",
+            )
+            _logger.info("自动创建占位 auth.json（免登录）: %s", auth_path)
+
         # 生成 catalog 文件
         try:
             catalog_path = generate_catalog()

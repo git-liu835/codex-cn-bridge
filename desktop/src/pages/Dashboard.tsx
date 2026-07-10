@@ -70,13 +70,14 @@ const Dashboard: React.FC = () => {
   // auth 状态中文映射
   const authStatusText: Record<string, string> = {
     valid: '官方登录正常',
+    'bridge-managed': '免登录模式',
     missing: '未登录',
     corrupted: '登录态损坏',
     incomplete: '登录态不完整',
     parse_error: '登录态解析失败',
     unknown: '未知',
   };
-  const authStatusClass = authStatus === 'valid' ? 'success' : (authStatus === 'missing' || authStatus === 'corrupted' ? 'error' : 'warn');
+  const authStatusClass = authStatus === 'valid' ? 'success' : (authStatus === 'bridge-managed' ? 'success' : (authStatus === 'missing' || authStatus === 'corrupted' ? 'error' : 'warn'));
 
   return (
     <div className="page">

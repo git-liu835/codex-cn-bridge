@@ -142,6 +142,7 @@ export const api = {
         api_key_env: string;
         docs_url: string;
         models: string[];
+        region: 'domestic' | 'overseas' | 'local';
       }>;
     }>('/admin/api/provider-presets'),
 
