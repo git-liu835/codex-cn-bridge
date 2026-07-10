@@ -222,6 +222,11 @@ def update_codex_config(catalog_path: Path | None = None) -> bool:
         _logger.warning("Codex config.toml 不存在: %s", config_path)
         return False
 
+    # 官方模式下不写入 model_catalog_json（避免污染官方配置导致模型列表/会话异常）
+    if get_codex_mode() == "official":
+        _logger.info("当前为官方模式，跳过 model_catalog_json 写入")
+        return True
+
     content = config_path.read_text(encoding="utf-8")
     catalog_line = f'model_catalog_json = "{catalog_path.name}"'
 
