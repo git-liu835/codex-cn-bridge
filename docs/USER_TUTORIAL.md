@@ -138,7 +138,25 @@ claude
 
 ## 七、常见问题
 
-**Q: Claude Code 连不上？**
+**Q: 怎么确认是 Key 问题还是桥接器问题？**
+
+先直连 DeepSeek（方法 A），再走本地桥接器（方法 B）：
+
+```powershell
+# 方法 A：直连官方（验证 Key）
+$headers = @{ Authorization = "Bearer $env:DEEPSEEK_API_KEY"; "Content-Type" = "application/json" }
+$body = '{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}],"max_tokens":16}'
+Invoke-WebRequest -Uri "https://api.deepseek.com/v1/chat/completions" -Method POST -Headers $headers -Body $body
+
+# 方法 B：走桥接器（验证代理）—— 先启动 Bridge
+$headers = @{ Authorization = "Bearer any-value"; "Content-Type" = "application/json" }
+Invoke-WebRequest -Uri "http://localhost:8765/v1/chat/completions" -Method POST -Headers $headers -Body $body
+```
+
+- A 失败 → Key / 余额 / 网络问题  
+- A 通、B 失败 → 桥接器配置问题（看 `~/.code-cn-bridge.yaml` 的 provider、映射、是否启动）
+
+**Q: Claude Code / Codex 连不上？**
 
 ```bash
 # 确认代理在运行

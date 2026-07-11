@@ -25,6 +25,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  addProviderModels: (data: Record<string, unknown>) =>
+    request<{ status: string; added: string[]; count: number; message: string }>(
+      '/admin/api/models/bulk',
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    ),
   updateModel: (alias: string, data: Record<string, unknown>, qs?: string) =>
     request<{ status: string }>(`/admin/api/models/${encodeURIComponent(alias)}${qs || ''}`, {
       method: 'PUT',

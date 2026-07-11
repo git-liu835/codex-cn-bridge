@@ -73,6 +73,7 @@ const Models: React.FC = () => {
   const [presets, setPresets] = useState<Array<{
     name: string; label: string; adapter: string; base_url: string;
     api_key_env: string; docs_url: string; models: string[];
+    context_window?: number; enable_thinking?: boolean;
     region: 'domestic' | 'overseas' | 'local';
   }>>([]);
   const [selectedPresetName, setSelectedPresetName] = useState<string>('');
@@ -214,22 +215,43 @@ const Models: React.FC = () => {
   };
 
   const handleAddCard = async () => {
-    // provider 和 api_key 必填；alias/target 由预设自动填充，兜底用 provider 名
+    // provider 和 api_key 必填；有预设时一次性写入该厂商全部模型，供 Codex 切换
     if (!cardForm.provider || !cardForm.api_key) return;
-    const alias = cardForm.alias || cardForm.target || cardForm.provider;
-    const target = cardForm.target || cardForm.provider;
     setLoading(true);
     try {
-      const flags = typeToFlags(cardForm.mtype);
-      await api.addModel({
-        alias, target_model: target,
-        provider: cardForm.provider, adapter: cardForm.adapter,
-        base_url: cardForm.base_url, api_key: cardForm.api_key,
-        api_key_env: cardForm.api_key_env, enabled: true,
-        ...flags,
-      });
-      setShowCardForm(false);
-      await load();
+      const presetModels = selectedPreset?.models?.length
+        ? selectedPreset.models
+        : [(cardForm.target || cardForm.alias || cardForm.provider)];
+
+      if (selectedPreset && selectedPreset.models.length > 0) {
+        const result = await api.addProviderModels({
+          preset: selectedPreset.name,
+          provider: cardForm.provider,
+          adapter: cardForm.adapter,
+          base_url: cardForm.base_url,
+          api_key: cardForm.api_key,
+          api_key_env: cardForm.api_key_env,
+          models: presetModels,
+          enable_thinking: selectedPreset.enable_thinking ?? true,
+          context_window: selectedPreset.context_window,
+        });
+        setShowCardForm(false);
+        await load();
+        alert(result.message || `已添加 ${result.count} 个模型，可在 Codex 中切换`);
+      } else {
+        const flags = typeToFlags(cardForm.mtype);
+        const alias = cardForm.alias || cardForm.target || cardForm.provider;
+        const target = cardForm.target || cardForm.provider;
+        await api.addModel({
+          alias, target_model: target,
+          provider: cardForm.provider, adapter: cardForm.adapter,
+          base_url: cardForm.base_url, api_key: cardForm.api_key,
+          api_key_env: cardForm.api_key_env, enabled: true,
+          ...flags,
+        });
+        setShowCardForm(false);
+        await load();
+      }
     } catch (err: any) {
       alert(tl('common.error') + ': ' + (err.message || err));
     } finally { setLoading(false); }
@@ -669,9 +691,22 @@ const Models: React.FC = () => {
                   <code>{selectedPreset.base_url}</code>
                 </div>
                 <div className="preset-info-row">
-                  <span className="preset-info-label">默认模型：</span>
-                  <code>{cardForm.target || selectedPreset.models[0]}</code>
+                  <span className="preset-info-label">上下文：</span>
+                  <code>{selectedPreset.context_window
+                    ? `${Math.round(selectedPreset.context_window / 1000)}K`
+                    : '—'}</code>
                 </div>
+                <div className="preset-info-row" style={{ alignItems: 'flex-start' }}>
+                  <span className="preset-info-label">模型列表：</span>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {selectedPreset.models.map(m => (
+                      <code key={m} style={{ fontSize: 11 }}>{m}</code>
+                    ))}
+                  </div>
+                </div>
+                <p style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--text-muted)' }}>
+                  保存后将写入全部模型，可在 Codex 下拉框中切换同厂商模型。
+                </p>
               </div>
             )}
 

@@ -67,8 +67,35 @@ model_mapping:
     is_multimodal: false
     is_video_gen: false
     provider: deepseek
-    target: deepseek-v4
+    target: deepseek-v4-pro
     thinking_budget: 4096
+    context_window: 1000000
+    video_gen_alias: null
+    vision_alias: null
+  deepseek-v4-pro:
+    enable_thinking: true
+    enabled: true
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: deepseek
+    target: deepseek-v4-pro
+    thinking_budget: 4096
+    context_window: 1000000
+    video_gen_alias: null
+    vision_alias: null
+  deepseek-v4-flash:
+    enable_thinking: true
+    enabled: true
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: deepseek
+    target: deepseek-v4-flash
+    thinking_budget: 4096
+    context_window: 1000000
     video_gen_alias: null
     vision_alias: null
   doubao-pro-1-5:
@@ -422,7 +449,7 @@ providers:
     adapter: deepseek
     api_key: ''
     api_key_env: DEEPSEEK_API_KEY
-    base_url: https://api.deepseek.com
+    base_url: https://api.deepseek.com/v1
     enabled: true
     extra_headers: {}
     max_retries: 0

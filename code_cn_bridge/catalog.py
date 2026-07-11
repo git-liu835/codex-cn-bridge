@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import get_config
+from .provider_presets import estimate_context_window
 
 _logger = logging.getLogger(__name__)
 
@@ -76,24 +77,9 @@ def _build_model_entry(alias: str, item: dict[str, Any], template: dict[str, Any
     is_vid = item.get("is_video_gen", False)
     is_thinking = item.get("enable_thinking", False)
 
-    # 估算上下文窗口
-    ctx = 200000
-    alias_lower = alias.lower()
-    target_lower = target.lower()
-    if "kimi" in alias_lower or "kimi" in target_lower:
-        ctx = 2000000
-    elif "minimax" in alias_lower or "minimax" in target_lower:
-        ctx = 1000000
-    elif "qwen" in alias_lower or "qwen" in target_lower:
-        ctx = 256000
-    elif "doubao" in alias_lower or "doubao" in target_lower:
-        ctx = 256000
-    elif "ernie" in alias_lower or "speed-pro" in alias_lower:
-        ctx = 128000
-    elif "spark" in alias_lower or "spark" in target_lower:
-        ctx = 128000
-    elif "ollama" in alias_lower or "ollama" in target_lower:
-        ctx = 8192
+    ctx = estimate_context_window(
+        alias, target, provider_name, item.get("context_window")
+    )
 
     # 构建展示名称：alias + 真实模型信息
     display_name = alias

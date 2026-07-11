@@ -237,6 +237,7 @@ class Config:
             entry.setdefault("enabled", True)
             entry.setdefault("enable_thinking", True)
             entry.setdefault("thinking_budget", 4096)
+            # context_window 可选；未设置时由 provider_presets.estimate_context_window 推断
             return entry
 
         for alias, entry in mapping.items():
@@ -481,9 +482,12 @@ class Config:
                     return result
 
         # 2. 模糊匹配 provider 名（仅启用且有 API key 的 provider）
+        # 例: 请求 model=deepseek-chat → provider=deepseek，target 保持 deepseek-chat
+        # 注意：必须透传原始模型名，不能改成 _get_default_model，否则
+        # 「其他软件用 deepseek-chat 能通、桥接器用同一 key 却失败」。
         for pname, pinfo in self.providers.items():
             if pinfo.get("enabled", True) and self._has_api_key(pinfo) and pname in model_name.lower():
-                return pname, self._get_default_model(pname)
+                return pname, model_name
 
         # 3. 返回第一个启用且有 API key 的 provider
         enabled = self._enabled_providers()

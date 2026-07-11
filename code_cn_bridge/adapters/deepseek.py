@@ -1,15 +1,11 @@
-"""DeepSeek 适配器 —— 支持 V4-Pro / V4-Flash (2026-04)
+"""DeepSeek 适配器 —— 支持 V4-Pro / V4-Flash / deepseek-chat
 
-DeepSeek V4-Pro:
-  - 1.6T MoE, 49B active
-  - 上下文: 1M tokens, max_output: 384K
-  - thinking 三模式: non-thinking, thinking (Think High), thinking_max (Think Max)
-  - 通过 thinking_mode 参数控制, 不支持 budget_tokens
-  - Anthropic 兼容端点支持 thinking.budget_tokens, 主流端点不支持
-
-DeepSeek V4-Flash:
-  - 284B MoE, 13B active
-  - 同样支持 thinking 三模式
+官方文档 (https://api-docs.deepseek.com/):
+  - base_url: https://api.deepseek.com 或 https://api.deepseek.com/v1
+  - model: deepseek-chat / deepseek-reasoner（兼容名）
+           deepseek-v4-pro / deepseek-v4-flash（当前正式名）
+  - thinking 控制: thinking: {type: "enabled"|"disabled"}
+  - effort 控制: reasoning_effort: "high"|"max"
 """
 
 from __future__ import annotations
@@ -21,10 +17,10 @@ from .base import BaseAdapter
 
 class DeepSeekAdapter(BaseAdapter):
     name = "deepseek"
-    base_url = "https://api.deepseek.com"
+    base_url = "https://api.deepseek.com/v1"
     api_key_env = "DEEPSEEK_API_KEY"
     unsupported_features: set[str] = set()
-    supports_thinking_budget: bool = False  # DeepSeek 主流端点不支持 budget_tokens
+    supports_thinking_budget: bool = False  # 官方 OpenAI 兼容端点用 reasoning_effort，不用 budget_tokens
     thinking_mode: str = "auto"
 
     capabilities: dict[str, bool | int] = {
@@ -39,40 +35,42 @@ class DeepSeekAdapter(BaseAdapter):
     }
 
     def apply_thinking(self, chat_req: dict) -> dict:
-        """DeepSeek V4+ thinking 控制 → thinking_mode 参数
+        """DeepSeek V4 thinking 控制 → 官方 thinking + reasoning_effort
 
-        effort 映射:
-          low    → thinking_mode: "non-thinking"
-          medium → thinking_mode: "thinking"       (Think High)
-          high   → thinking_mode: "thinking_max"   (Think Max)
+        映射:
+          disable / low budget → thinking.disabled
+          medium               → thinking.enabled + reasoning_effort=high
+          high                 → thinking.enabled + reasoning_effort=max
         """
+        # 清掉历史错误字段，避免上游拒识
+        chat_req.pop("thinking_mode", None)
+
         if "_disable_thinking" in chat_req:
             chat_req.pop("_disable_thinking")
             chat_req.pop("_thinking_budget", None)
-            if "thinking_mode" not in chat_req:
-                chat_req["thinking_mode"] = "non-thinking"
+            chat_req["thinking"] = {"type": "disabled"}
+            chat_req.pop("reasoning_effort", None)
             return chat_req
 
         budget = chat_req.pop("_thinking_budget", 4096)
 
-        if "thinking_mode" in chat_req:
+        # 已显式设置 thinking → 只补齐 effort
+        if "thinking" in chat_req:
+            thinking = chat_req.get("thinking")
+            if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+                chat_req.pop("reasoning_effort", None)
+                return chat_req
+            if "reasoning_effort" not in chat_req:
+                chat_req["reasoning_effort"] = "high" if budget <= 16384 else "max"
             return chat_req
 
-        # budget → effort → thinking_mode
         if budget <= 2048:
-            chat_req["thinking_mode"] = "non-thinking"
-        elif budget <= 16384:
-            chat_req["thinking_mode"] = "thinking"
+            chat_req["thinking"] = {"type": "disabled"}
+            chat_req.pop("reasoning_effort", None)
         else:
-            chat_req["thinking_mode"] = "thinking_max"
-
-        # 关键: max_tokens 兜底, thinking_max 可耗尽 384K
-        cur_max = chat_req.get("max_tokens", 0)
-        min_max = budget + 16384
-        if cur_max and cur_max < min_max:
-            chat_req["max_tokens"] = min_max
-        elif not cur_max:
-            chat_req["max_tokens"] = min_max
+            chat_req["thinking"] = {"type": "enabled"}
+            # 官方：low/medium 映射为 high；更高预算用 max
+            chat_req["reasoning_effort"] = "high" if budget <= 16384 else "max"
 
         return chat_req
 

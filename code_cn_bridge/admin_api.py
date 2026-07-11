@@ -17,7 +17,8 @@ from .config import get_config
 from .adapters import get_registry
 from .stats import get_stats, RequestLog
 from .client import UpstreamClient
-from .catalog import get_codex_mode, switch_codex_mode
+from .catalog import get_codex_mode, switch_codex_mode, generate_catalog
+from .provider_presets import list_presets_public, get_preset, estimate_context_window
 
 logger = logging.getLogger("code-cn-bridge")
 
@@ -37,7 +38,7 @@ async def get_status():
         "running": True,
         "host": cfg.server_host,
         "port": cfg.server_port,
-        "version": "0.6.2",
+        "version": "0.6.3",
         "stats": stats.get_summary(),
     }
 
@@ -171,7 +172,96 @@ async def add_model(data: dict):
         mapping[alias] = [existing, new_entry]
 
     cfg.save()
+    try:
+        generate_catalog()
+    except Exception as e:
+        logger.warning("生成 catalog 失败: %s", e)
     return {"status": "ok", "alias": alias}
+
+
+@router.post("/models/bulk")
+async def add_provider_models(data: dict):
+    """一次性添加某厂商的全部模型列表（供 Codex 下拉切换）
+
+    请求体:
+      provider, adapter, base_url, api_key, api_key_env
+      models: ["deepseek-v4-pro", "deepseek-v4-flash", ...]  可选，默认用预设
+      preset: "deepseek"  可选，用预设名填充缺失字段
+    """
+    cfg = get_config()
+    preset_name = (data.get("preset") or data.get("provider") or "").strip()
+    preset = get_preset(preset_name) if preset_name else None
+
+    provider_name = (data.get("provider") or (preset or {}).get("name") or "").strip()
+    if not provider_name:
+        return JSONResponse({"error": "provider 为必填项"}, status_code=400)
+
+    api_key = data.get("api_key", "")
+    if not api_key and not cfg.get_api_keys(provider_name):
+        return JSONResponse({"error": "api_key 为必填项"}, status_code=400)
+
+    adapter = data.get("adapter") or (preset or {}).get("adapter") or provider_name
+    base_url = data.get("base_url") or (preset or {}).get("base_url") or ""
+    api_key_env = data.get("api_key_env") or (preset or {}).get("api_key_env") or ""
+    enable_thinking = data.get(
+        "enable_thinking",
+        (preset or {}).get("enable_thinking", True),
+    )
+    ctx = data.get("context_window") or (preset or {}).get("context_window")
+    models = data.get("models") or (preset or {}).get("models") or []
+    if not models:
+        return JSONResponse({"error": "models 列表为空"}, status_code=400)
+
+    providers = cfg._data.setdefault("providers", {})
+    providers[provider_name] = {
+        **providers.get(provider_name, {}),
+        "adapter": adapter,
+        "base_url": base_url,
+        "api_key_env": api_key_env,
+        "enabled": True,
+    }
+    if api_key:
+        providers[provider_name]["api_key"] = api_key
+
+    mapping = cfg._data.setdefault("model_mapping", {})
+    added = []
+    for model_id in models:
+        model_id = str(model_id).strip()
+        if not model_id:
+            continue
+        # 别名 = 模型 id，Codex 可直接切换
+        entry = {
+            "target": model_id,
+            "provider": provider_name,
+            "enabled": True,
+            "enable_thinking": enable_thinking,
+            "thinking_budget": data.get("thinking_budget", 4096),
+            "is_multimodal": False,
+            "vision_alias": None,
+            "is_image_gen": "image" in model_id.lower(),
+            "image_gen_alias": None,
+            "is_video_gen": "video" in model_id.lower(),
+            "video_gen_alias": None,
+            "context_window": estimate_context_window(
+                model_id, model_id, provider_name, ctx
+            ),
+        }
+        mapping[model_id] = entry
+        added.append(model_id)
+
+    cfg.save()
+    try:
+        generate_catalog()
+    except Exception as e:
+        logger.warning("生成 catalog 失败: %s", e)
+
+    return {
+        "status": "ok",
+        "provider": provider_name,
+        "added": added,
+        "count": len(added),
+        "message": f"已添加 {provider_name} 的 {len(added)} 个模型，可在 Codex 中切换",
+    }
 
 
 @router.put("/models/{alias}")
@@ -437,18 +527,20 @@ async def test_connection(alias: str, data: dict | None = None):
 
         # 构建测试请求头（加 User-Agent 避免 WAF 拦截）
         headers = adapter.get_headers(api_key)
-        headers.setdefault("User-Agent", "code-cn-bridge/0.6.2")
+        headers.setdefault("User-Agent", "code-cn-bridge/0.6.3")
         # 应用 provider 配置的 extra_headers
         for k, v in (provider.get("extra_headers") or {}).items():
             headers[k] = v
 
         # 先尝试 chat 端点
         chat_url = adapter.build_chat_url()
+        # 连通性测试：关闭 thinking，避免 V4 长推理干扰判断
         chat_body = adapter.preprocess_chat_request({
             "model": target,
             "messages": [{"role": "user", "content": "Hi"}],
-            "max_tokens": 5,
+            "max_tokens": 16,
             "stream": False,
+            "_disable_thinking": True,
         })
 
         start = time.time()
@@ -852,22 +944,9 @@ async def export_codex_config():
                 is_mm = item.get("is_multimodal", False)
                 is_thinking = item.get("enable_thinking", False)
 
-                # 估算上下文窗口（与 /v1/models 一致）
-                ctx = 200000
-                if "kimi" in alias:
-                    ctx = 2000000
-                elif "minimax" in alias:
-                    ctx = 1000000
-                elif "qwen" in alias:
-                    ctx = 256000
-                elif "doubao" in alias:
-                    ctx = 256000
-                elif "ernie" in alias or "speed-pro" in alias:
-                    ctx = 128000
-                elif "spark" in alias:
-                    ctx = 128000
-                elif "ollama" in alias:
-                    ctx = 8192
+                ctx = estimate_context_window(
+                    alias, target, provider_name, item.get("context_window")
+                )
 
                 toml_lines.append(f'[model_providers.code-cn-bridge.model_info."{alias}"]')
                 toml_lines.append(f'name = "{target}"')
@@ -1096,244 +1175,10 @@ def _mode_description(mode: str) -> str:
     return f"未知模式: {mode}"
 
 
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 # Provider 预设 & Codex 安装状态
-# ═══════════════════════════════════════════════════════════════════
-
-# 内置 provider 预设模板：用户添加卡片时选预设即可自动填充 base_url/adapter/api_key_env
-# 字段说明：
-#   name:        provider 标识（写入 config.yaml 的 key）
-#   label:       展示名
-#   adapter:     适配器类型
-#   base_url:    API 基础地址
-#   api_key_env: 环境变量名
-#   docs_url:    API Key 申请文档
-#   models:      推荐模型列表（target_model）
-_PROVIDER_PRESETS: list[dict] = [
-    # ═══ 国内厂商 ═══
-    {
-        "name": "deepseek",
-        "label": "DeepSeek 深度求索",
-        "adapter": "deepseek",
-        "base_url": "https://api.deepseek.com",
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "docs_url": "https://platform.deepseek.com/api_keys",
-        "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4"],
-        "region": "domestic",
-    },
-    {
-        "name": "zhipu",
-        "label": "智谱 GLM",
-        "adapter": "zhipu",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "api_key_env": "ZHIPU_API_KEY",
-        "docs_url": "https://open.bigmodel.cn/usercenter/apikeys",
-        "models": ["glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash"],
-        "region": "domestic",
-    },
-    {
-        "name": "qwen",
-        "label": "通义千问 阿里云",
-        "adapter": "qwen",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key_env": "QWEN_API_KEY",
-        "docs_url": "https://bailian.console.aliyun.com/?apiKey=1#/api-key",
-        "models": ["qwen3-coder-plus", "qwen3-coder-next", "qwen3.5-max", "qwen3-max"],
-        "region": "domestic",
-    },
-    {
-        "name": "kimi",
-        "label": "Kimi 月之暗面",
-        "adapter": "kimi",
-        "base_url": "https://api.moonshot.cn/v1",
-        "api_key_env": "KIMI_API_KEY",
-        "docs_url": "https://platform.moonshot.cn/console/api-keys",
-        "models": ["kimi-k2.6", "kimi-k2.5", "kimi-k2"],
-        "region": "domestic",
-    },
-    {
-        "name": "doubao",
-        "label": "豆包 字节跳动",
-        "adapter": "doubao",
-        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-        "api_key_env": "ARK_API_KEY",
-        "docs_url": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
-        "models": ["doubao-seed-2.0", "doubao-seed-1.8", "doubao-5.0-pro"],
-        "region": "domestic",
-    },
-    {
-        "name": "ernie",
-        "label": "文心一言 百度",
-        "adapter": "ernie",
-        "base_url": "https://qianfan.baidubce.com/v2",
-        "api_key_env": "ERNIE_API_KEY",
-        "docs_url": "https://console.bce.baidu.com/qianfan/ais/console/applicationConsole/application",
-        "models": ["ernie-5.1", "ernie-speed-pro-128k"],
-        "region": "domestic",
-    },
-    {
-        "name": "hunyuan",
-        "label": "混元 腾讯",
-        "adapter": "hunyuan",
-        "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
-        "api_key_env": "HUNYUAN_API_KEY",
-        "docs_url": "https://console.cloud.tencent.com/hunyuan/api-key",
-        "models": ["hunyuan-pro", "hunyuan-turbo"],
-        "region": "domestic",
-    },
-    {
-        "name": "minimax",
-        "label": "MiniMax",
-        "adapter": "minimax",
-        "base_url": "https://api.minimaxi.com/v1",
-        "api_key_env": "MINIMAX_API_KEY",
-        "docs_url": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
-        "models": ["MiniMax-M3", "MiniMax-M2.7"],
-        "region": "domestic",
-    },
-    {
-        "name": "siliconflow",
-        "label": "硅基流动 SiliconFlow",
-        "adapter": "siliconflow",
-        "base_url": "https://api.siliconflow.cn/v1",
-        "api_key_env": "SILICONFLOW_API_KEY",
-        "docs_url": "https://cloud.siliconflow.cn/account/ak",
-        "models": ["deepseek-ai/DeepSeek-V4", "Qwen/Qwen3-Coder-Next", "zhipuai/GLM-5.2"],
-        "region": "domestic",
-    },
-    {
-        "name": "spark",
-        "label": "讯飞星火",
-        "adapter": "spark",
-        "base_url": "https://spark-api-open.xf-yun.com/v1",
-        "api_key_env": "SPARK_API_KEY",
-        "docs_url": "https://console.xfyun.cn/services/bm4",
-        "models": ["spark-v4.5", "spark-max", "spark-pro"],
-        "region": "domestic",
-    },
-    {
-        "name": "baichuan",
-        "label": "百川 Baichuan",
-        "adapter": "baichuan",
-        "base_url": "https://api.baichuan-ai.com/v1",
-        "api_key_env": "BAICHUAN_API_KEY",
-        "docs_url": "https://platform.baichuan-ai.com/console/apikey",
-        "models": ["Baichuan-4-Turbo", "Baichuan-4-Air"],
-        "region": "domestic",
-    },
-    {
-        "name": "step",
-        "label": "阶跃星辰 Step",
-        "adapter": "step",
-        "base_url": "https://api.stepfun.com/v1",
-        "api_key_env": "STEP_API_KEY",
-        "docs_url": "https://platform.stepfun.com/interface-key",
-        "models": ["step-3", "step-2-16k"],
-        "region": "domestic",
-    },
-    {
-        "name": "agnes",
-        "label": "Agnes 聚合",
-        "adapter": "agnes",
-        "base_url": "https://apihub.agnes-ai.com/v1",
-        "api_key_env": "AGNES_API_KEY",
-        "docs_url": "",
-        "models": ["agnes-2.0-flash", "agnes-1.5-flash", "agnes-image-2.1-flash", "agnes-video-v2.0"],
-        "region": "domestic",
-    },
-    # ═══ 国外厂商 ═══
-    {
-        "name": "openai",
-        "label": "OpenAI",
-        "adapter": "openai",
-        "base_url": "https://api.openai.com/v1",
-        "api_key_env": "OPENAI_API_KEY",
-        "docs_url": "https://platform.openai.com/api-keys",
-        "models": ["gpt-5.4", "gpt-5", "gpt-5-codex", "o3-pro"],
-        "region": "overseas",
-    },
-    {
-        "name": "anthropic",
-        "label": "Anthropic Claude",
-        "adapter": "anthropic",
-        "base_url": "https://api.anthropic.com/v1",
-        "api_key_env": "ANTHROPIC_API_KEY",
-        "docs_url": "https://console.anthropic.com/settings/keys",
-        "models": ["claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
-        "region": "overseas",
-    },
-    {
-        "name": "google",
-        "label": "Google Gemini",
-        "adapter": "google",
-        "base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "api_key_env": "GOOGLE_API_KEY",
-        "docs_url": "https://aistudio.google.com/app/apikey",
-        "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
-        "region": "overseas",
-    },
-    {
-        "name": "xai",
-        "label": "xAI Grok",
-        "adapter": "xai",
-        "base_url": "https://api.x.ai/v1",
-        "api_key_env": "XAI_API_KEY",
-        "docs_url": "https://console.x.ai",
-        "models": ["grok-4", "grok-4-fast", "grok-3"],
-        "region": "overseas",
-    },
-    {
-        "name": "mistral",
-        "label": "Mistral AI",
-        "adapter": "mistral",
-        "base_url": "https://api.mistral.ai/v1",
-        "api_key_env": "MISTRAL_API_KEY",
-        "docs_url": "https://console.mistral.ai/api-keys",
-        "models": ["mistral-large-2", "codestral-25.01", "mistral-small"],
-        "region": "overseas",
-    },
-    {
-        "name": "groq",
-        "label": "Groq 极速推理",
-        "adapter": "groq",
-        "base_url": "https://api.groq.com/openai/v1",
-        "api_key_env": "GROQ_API_KEY",
-        "docs_url": "https://console.groq.com/keys",
-        "models": ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
-        "region": "overseas",
-    },
-    {
-        "name": "openrouter",
-        "label": "OpenRouter 聚合",
-        "adapter": "openrouter",
-        "base_url": "https://openrouter.ai/api/v1",
-        "api_key_env": "OPENROUTER_API_KEY",
-        "docs_url": "https://openrouter.ai/keys",
-        "models": ["anthropic/claude-opus-4.5", "openai/gpt-5.4", "google/gemini-2.5-pro"],
-        "region": "overseas",
-    },
-    # ═══ 本地部署 ═══
-    {
-        "name": "ollama",
-        "label": "Ollama 本地",
-        "adapter": "ollama",
-        "base_url": "http://localhost:11434/v1",
-        "api_key_env": "OLLAMA_API_KEY",
-        "docs_url": "https://ollama.com/download",
-        "models": ["qwen3:latest", "deepseek-v4:latest", "llama3:latest"],
-        "region": "local",
-    },
-    {
-        "name": "lmstudio",
-        "label": "LM Studio 本地",
-        "adapter": "lmstudio",
-        "base_url": "http://localhost:1234/v1",
-        "api_key_env": "LMSTUDIO_API_KEY",
-        "docs_url": "https://lmstudio.ai",
-        "models": ["local-model"],
-        "region": "local",
-    },
-]
+# 预设数据见 provider_presets.py（统一 base_url / 模型列表 / 上下文）
+# ===================================================================
 
 
 @router.get("/provider-presets")
@@ -1342,7 +1187,7 @@ async def get_provider_presets():
 
     供前端"添加模型卡片"时选择预设，自动填充 base_url/adapter/api_key_env。
     """
-    return {"presets": _PROVIDER_PRESETS}
+    return {"presets": list_presets_public()}
 
 
 @router.get("/codex-status")

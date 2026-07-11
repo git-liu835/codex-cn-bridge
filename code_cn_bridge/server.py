@@ -26,6 +26,7 @@ from .protocol import translate_request, translate_response, StreamTranslator, _
 from .client import UpstreamClient
 from .circuit_breaker import get_circuit_breaker_registry, get_health_prober
 from .catalog import generate_catalog, update_codex_config
+from .provider_presets import estimate_context_window
 from .middleware import (
     ErrorHandlingMiddleware,
     RequestLoggingMiddleware,
@@ -1305,7 +1306,7 @@ def create_app(verbose: bool = False) -> FastAPI:
 
     app = FastAPI(
         title="code CN Bridge",
-        version="0.6.2",
+        version="0.6.3",
         description="OpenAI Responses API → Chat Completions API 协议转换代理",
         lifespan=lifespan,
     )
@@ -1364,22 +1365,9 @@ def create_app(verbose: bool = False) -> FastAPI:
                 is_vid = item.get("is_video_gen", False)
                 is_thinking = item.get("enable_thinking", False)
 
-                # 估算上下文窗口
-                ctx = 200000
-                if "kimi" in alias:
-                    ctx = 2000000
-                elif "minimax" in alias:
-                    ctx = 1000000
-                elif "qwen" in alias:
-                    ctx = 256000
-                elif "doubao" in alias:
-                    ctx = 256000
-                elif "ernie" in alias or "speed-pro" in alias:
-                    ctx = 128000
-                elif "spark" in alias:
-                    ctx = 128000
-                elif "ollama" in alias:
-                    ctx = 8192
+                ctx = estimate_context_window(
+                    alias, target, provider_name, item.get("context_window")
+                )
 
                 model_obj = {
                     "id": alias,              # 用 alias 作为 id，与 config.toml 一致

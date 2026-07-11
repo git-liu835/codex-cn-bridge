@@ -440,6 +440,9 @@ def translate_request(
                 cached_summaries.append(f"[对话历史摘要: {conv_id}]\n{summary}")
 
     # instructions → system 消息
+    # 注意：禁止向 instructions 注入额外身份/语言指令。
+    # DeepSeek/GLM 等对 system prompt 篡改极度敏感，会导致空输出
+    # （response.completed 但 output: []），表现为 Codex「思考几秒后停止」。
     instructions = responses_body.get("instructions", "").strip()
 
     # 从 config 注入持久化项目上下文（如 CLAUDE.md）
@@ -450,16 +453,6 @@ def translate_request(
             instructions = project_ctx + "\n\n---\n" + instructions
         else:
             instructions = project_ctx
-
-    # 强制中文回复指令 —— 注入到 instructions 开头，确保模型始终用中文回答
-    _CHINESE_DIRECTIVE = (
-        "【重要】你必须始终使用简体中文回复用户，即使用户用英文提问或系统提示是英文。"
-        "代码注释也用中文。只有在编写代码本身时才使用英文。"
-    )
-    if instructions:
-        instructions = _CHINESE_DIRECTIVE + "\n\n" + instructions
-    else:
-        instructions = _CHINESE_DIRECTIVE
 
     if instructions:
         msg_content = instructions
@@ -559,17 +552,20 @@ def translate_request(
             elif fmt_type == "json_object":
                 chat_req["response_format"] = {"type": "json_object"}
 
-    # ── 对话压缩 + 截断（保留记忆）─────────────────────────────
-    # 两步策略：
-    #   1. 超过 20 条非 system 消息 → 压缩最旧的消息为摘要
-    #   2. 超过 30 条 → 额外截断（以防压缩后仍超限）
-    # DeepSeek 实测：prompt_tokens > 98K 时只输出 3 token 就 stop。
-    # 因此保守设为 64K，既能记住更长的上下文，又远离 98K 危险区。
+    # ── 对话压缩 + 截断（按模型上下文窗口）────────────────────
+    # DeepSeek V4 等为 1M 上下文：接近 85% 时自动压缩旧对话，
+    # 95% 时硬截断，避免打满窗口。
+    from .provider_presets import (
+        estimate_context_window,
+        CONTEXT_COMPRESS_RATIO,
+        CONTEXT_TRUNCATE_RATIO,
+    )
+
     truncation = responses_body.get("truncation")
-    max_tokens = chat_req.get("max_tokens", 4096)
-    MAX_USER_TOKENS = 65536
-    COMPRESS_THRESHOLD = 40  # 超过此数开始压缩旧消息
-    TRUNCATE_THRESHOLD = 60  # 超过此数额外截断
+    max_tokens = chat_req.get("max_tokens", 4096) or 4096
+    ctx_window = estimate_context_window(alias, target_model)
+    compress_limit = max(8192, int(ctx_window * CONTEXT_COMPRESS_RATIO) - int(max_tokens))
+    truncate_limit = max(compress_limit, int(ctx_window * CONTEXT_TRUNCATE_RATIO) - int(max_tokens))
 
     msgs = chat_req["messages"]
     msgs = _merge_system_messages(msgs)
@@ -577,28 +573,33 @@ def translate_request(
     system_msgs = [m for m in msgs if m.get("role") == "system"]
     other_msgs = [m for m in msgs if m.get("role") != "system"]
 
-    # 第一步：压缩旧消息为摘要（保留记忆）
-    if len(other_msgs) > COMPRESS_THRESHOLD:
-        keep_recent = max(10, COMPRESS_THRESHOLD // 2)
+    total_tokens = sum(_msg_token_count(m) for m in msgs)
+    COMPRESS_MSG_THRESHOLD = 40
+    TRUNCATE_MSG_THRESHOLD = 80
+
+    # 第一步：消息条数过多 或 token 接近上下文上限 → 压缩旧消息
+    if len(other_msgs) > COMPRESS_MSG_THRESHOLD or total_tokens > compress_limit:
+        keep_recent = max(10, min(30, len(other_msgs) // 3))
         chat_req["messages"] = _compress_messages(msgs, keep_recent=keep_recent)
         other_msgs = [m for m in chat_req["messages"] if m.get("role") != "system"]
+        total_tokens = sum(_msg_token_count(m) for m in chat_req["messages"])
         _logger.info(
-            "对话压缩: total=%d → compressed (kept %d recent + summary)",
-            len(msgs), keep_recent,
+            "对话压缩: ctx=%d compress_at=%d tokens≈%d kept_recent=%d",
+            ctx_window, compress_limit, total_tokens, keep_recent,
         )
 
-    # 第二步：如仍超限，token 截断
-    if len(other_msgs) > TRUNCATE_THRESHOLD:
+    # 第二步：仍超限 → token 截断
+    if len(other_msgs) > TRUNCATE_MSG_THRESHOLD or total_tokens > truncate_limit:
         system_msgs = [m for m in chat_req["messages"] if m.get("role") == "system"]
         other_msgs = [m for m in chat_req["messages"] if m.get("role") != "system"]
         _logger.warning(
-            "消息过长自动截断: total=%d system=%d other=%d",
-            len(chat_req["messages"]), len(system_msgs), len(other_msgs),
+            "消息过长自动截断: ctx=%d truncate_at=%d tokens≈%d msgs=%d",
+            ctx_window, truncate_limit, total_tokens, len(other_msgs),
         )
         chat_req["messages"] = system_msgs + _truncate_messages(
             other_msgs,
             max_output_tokens=max_tokens,
-            max_context_tokens=MAX_USER_TOKENS,
+            max_context_tokens=truncate_limit + int(max_tokens),
             preserve_system=False,
         )
 
@@ -606,6 +607,7 @@ def translate_request(
         chat_req["messages"] = _truncate_messages(
             chat_req["messages"],
             max_output_tokens=max_tokens,
+            max_context_tokens=truncate_limit + int(max_tokens),
         )
 
     # ── tools 映射 ──────────────────────────────────────────────
