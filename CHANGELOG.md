@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.4] - 2026-08-10
+
+### Changed
+- 刷新各厂商模型卡片为 2026-08 最新正式 API：
+  - DeepSeek：`deepseek-v4-flash`（Flash-0731 正式版）+ `deepseek-v4-pro`
+  - 通义千问：`qwen3.8-max`、`qwen3.7-plus` / `flash` / `max` + coder 系列
+  - Kimi：新增 `kimi-k3`，保留 `kimi-k2.7-code` 等
+  - 智谱 / 硅基流动 / OpenRouter 同步更新模型列表
+- 千问 3.7/3.8、Kimi K3、GLM-5.x 上下文窗口按官方 1M 估算
+
 ## [0.6.3] - 2026-07-11
 
 ### Changed

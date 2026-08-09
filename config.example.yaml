@@ -292,6 +292,19 @@ model_mapping:
     vision_alias: null
   kimi-k2-7-code:
     enable_thinking: true
+  kimi-k3:
+    enable_thinking: true
+    enabled: true
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: true
+    is_video_gen: false
+    provider: kimi
+    target: kimi-k3
+    thinking_budget: 4096
+    context_window: 1000000
+    video_gen_alias: null
+    vision_alias: null
     enabled: false
     image_gen_alias: null
     is_image_gen: false
@@ -360,6 +373,19 @@ model_mapping:
     provider: qwen
     target: qwen3-coder-plus
     thinking_budget: 4096
+    video_gen_alias: null
+    vision_alias: null
+  qwen3.8-max:
+    enable_thinking: true
+    enabled: true
+    image_gen_alias: null
+    is_image_gen: false
+    is_multimodal: false
+    is_video_gen: false
+    provider: qwen
+    target: qwen3.8-max
+    thinking_budget: 4096
+    context_window: 1000000
     video_gen_alias: null
     vision_alias: null
   qwen3.7-max:

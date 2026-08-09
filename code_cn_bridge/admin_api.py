@@ -38,7 +38,7 @@ async def get_status():
         "running": True,
         "host": cfg.server_host,
         "port": cfg.server_port,
-        "version": "0.6.3",
+        "version": "0.6.4",
         "stats": stats.get_summary(),
     }
 
@@ -527,7 +527,7 @@ async def test_connection(alias: str, data: dict | None = None):
 
         # 构建测试请求头（加 User-Agent 避免 WAF 拦截）
         headers = adapter.get_headers(api_key)
-        headers.setdefault("User-Agent", "code-cn-bridge/0.6.3")
+        headers.setdefault("User-Agent", "code-cn-bridge/0.6.4")
         # 应用 provider 配置的 extra_headers
         for k, v in (provider.get("extra_headers") or {}).items():
             headers[k] = v
@@ -896,7 +896,11 @@ async def export_codex_config():
         enabled_models = _collect_enabled_models(cfg)
 
         # 选默认模型：优先代码模型，其次第一个启用的
-        code_aliases = {"deepseek-v4", "gpt-5-code", "kimi-k2-7-code", "qwen3-coder-plus"}
+        code_aliases = {
+            "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4",
+            "gpt-5-code", "kimi-k3", "kimi-k2-7-code",
+            "qwen3.8-max", "qwen3-coder-plus", "qwen3.7-plus",
+        }
         default_alias = ""
         default_target = ""
         for alias, target, _ in enabled_models:
@@ -949,7 +953,7 @@ async def export_codex_config():
                 )
 
                 toml_lines.append(f'[model_providers.code-cn-bridge.model_info."{alias}"]')
-                toml_lines.append(f'name = "{target}"')
+                toml_lines.append(f'name = "{alias}"')
                 toml_lines.append(f'context_window = {ctx}')
                 toml_lines.append(f'supports_tool_calls = {"true" if not is_img and not is_vid else "false"}')
                 toml_lines.append(f'supports_streaming = true')

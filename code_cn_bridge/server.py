@@ -1306,7 +1306,7 @@ def create_app(verbose: bool = False) -> FastAPI:
 
     app = FastAPI(
         title="code CN Bridge",
-        version="0.6.3",
+        version="0.6.4",
         description="OpenAI Responses API → Chat Completions API 协议转换代理",
         lifespan=lifespan,
     )
@@ -1600,9 +1600,9 @@ def create_app(verbose: bool = False) -> FastAPI:
                 _safe_log("Chat 请求详情", chat_req)
 
             if stream:
-                # 2. 流式处理（返回真实模型名，Codex 显示 target_model）
+                # 2. 流式处理（返回用户配置的别名，Codex 直接显示 alias）
                 return StreamingResponse(
-                    _handle_stream(client, adapter, chat_req, target_model, verbose, start_time, provider_name, target_model),
+                    _handle_stream(client, adapter, chat_req, model, verbose, start_time, provider_name, target_model),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -1616,7 +1616,7 @@ def create_app(verbose: bool = False) -> FastAPI:
                 chat_resp = await client.chat_completion(chat_req)
                 if verbose:
                     _safe_log("Chat 响应", chat_resp)
-                responses_resp = translate_response(chat_resp, adapter, target_model, chat_req=chat_req)
+                responses_resp = translate_response(chat_resp, adapter, model, chat_req=chat_req)
 
                 # code_interpreter 拦截：执行 python 代码并注入结果
                 if builtin_flags["has_code_interpreter"]:
@@ -1708,7 +1708,7 @@ def create_app(verbose: bool = False) -> FastAPI:
                         logger.info("computer_use 循环: 再次请求模型 (msgs=%d)", len(chat_req["messages"]))
                         chat_resp = await client.chat_completion(chat_req)
                         _cua_total_tokens += chat_resp.get("usage", {}).get("total_tokens", 0)
-                        responses_resp = translate_response(chat_resp, adapter, target_model, chat_req=chat_req)
+                        responses_resp = translate_response(chat_resp, adapter, model, chat_req=chat_req)
 
                     # 循环结束 — 将累积的工具调用链拼入最终响应 output
                     _final_items = responses_resp.get("output", [])
@@ -2262,7 +2262,7 @@ def create_app(verbose: bool = False) -> FastAPI:
                             provider=provider_name, target_model=target_model)
                     else:
                         chat_resp = await client.chat_completion(chat_req)
-                        responses_resp = translate_response(chat_resp, adapter, target_model, chat_req=chat_req)
+                        responses_resp = translate_response(chat_resp, adapter, model, chat_req=chat_req)
                         if builtin_flags.get("has_code_interpreter"):
                             responses_resp = _process_code_interpreter_response(responses_resp, model)
                         if builtin_flags.get("has_computer_use"):
@@ -2393,9 +2393,9 @@ async def _handle_stream(
     """处理流式请求: 上游 Chat SSE → 适配器变换 → 协议转换 → Responses SSE
 
     稳定性保障:
-    - 30s chunk 超时，容忍 DeepSeek 等模型的长时间推理
-    - 闲置 > 25s 时发送保活信号
-    - 断连自动重试一次（重建 translator 避免状态污染）
+    - 每 10s 轮询一次，闲置 > 20s 即发送心跳保活，防止客户端超时断连
+    - 上游连续 120s 无任何数据才判定超时断开
+    - 断连自动重试（重建 translator 避免状态污染）
     - 始终发送 response.completed，Codex 不会悬挂
     """
     import httpx
@@ -2407,9 +2407,10 @@ async def _handle_stream(
         httpx.ReadError,
     )
 
-    CHUNK_TIMEOUT = 120.0  # 推理模型思考阶段可能长时间无输出，延长到 120 秒
-    MAX_RETRIES = 2  # 增加重试次数以应对不稳定的国产模型 API
-    IDLE_BEFORE_PING = 25.0
+    CHUNK_TIMEOUT = 120.0   # 上游连续无数据超过此时间才放弃
+    POLL_INTERVAL = 10.0    # 每 10s 轮询一次，保证心跳及时发出
+    IDLE_BEFORE_PING = 20.0 # 闲置超过 20s 开始发心跳（Codex 默认超时前）
+    MAX_RETRIES = 2         # 增加重试次数以应对不稳定的国产模型 API
 
     stream_error = ""
     retry_count = 0
@@ -2447,29 +2448,38 @@ async def _handle_stream(
         last_chunk_time = asyncio.get_event_loop().time()
 
         try:
+            # task 只在上一个完成后才创建下一个，避免并发 anext 破坏流
+            next_chunk_task = None
             while True:
-                # 使用 create_task + wait 替代 wait_for，避免超时取消破坏底层 HTTP 流
-                next_chunk_task = asyncio.ensure_future(anext(chat_stream))
+                if next_chunk_task is None:
+                    next_chunk_task = asyncio.ensure_future(anext(chat_stream))
                 try:
                     done, pending = await asyncio.wait(
                         {next_chunk_task},
-                        timeout=CHUNK_TIMEOUT,
+                        timeout=POLL_INTERVAL,
                         return_when=asyncio.FIRST_COMPLETED
                     )
                 except Exception as wait_err:
                     logger.error("asyncio.wait 异常: %s", wait_err)
+                    next_chunk_task.cancel()
                     break
 
                 if not done:
-                    # 超时但任务仍在 pending，不取消它，只发心跳保持连接
+                    # 本轮轮询未收到数据，检查闲置时长
                     idle_duration = asyncio.get_event_loop().time() - last_chunk_time
+                    if idle_duration > CHUNK_TIMEOUT:
+                        # 上游彻底无响应，放弃并触发重试
+                        logger.warning("上游流闲置超时 (%.0fs)，断开重试", idle_duration)
+                        next_chunk_task.cancel()
+                        stream_error = f"upstream idle timeout ({int(idle_duration)}s)"
+                        raise httpx.ReadTimeout(stream_error)
                     if idle_duration > IDLE_BEFORE_PING:
+                        # 发心跳保活，防止 Codex/客户端超时断连
                         yield ": keepalive\n\n"
-                    yield ": heartbeat\n\n"
                     # 继续等待同一个 task（不创建新 task）
                     continue
 
-                # task 已完成，获取结果
+                # task 已完成，获取结果，下轮循环创建新 task
                 try:
                     chunk = next_chunk_task.result()
                 except StopAsyncIteration:
@@ -2481,6 +2491,8 @@ async def _handle_stream(
                     logger.error("获取 chunk 结果异常: %s", e)
                     stream_error = str(e)
                     break
+                finally:
+                    next_chunk_task = None
 
                 last_chunk_time = asyncio.get_event_loop().time()
                 chunk_count += 1

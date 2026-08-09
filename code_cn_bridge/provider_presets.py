@@ -2,6 +2,8 @@
 
 桌面端「厂商卡片」、Codex catalog、/v1/models、上下文压缩共用此表，
 避免多处硬编码不一致。
+
+模型列表以各厂商 2026-08 公开 API 文档为准（百炼 / DeepSeek / Moonshot / 智谱等）。
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ def estimate_context_window(
 
     text = f"{alias} {target} {provider}".lower()
 
-    # DeepSeek V4：官方 1M
+    # DeepSeek V4：官方 1M（含 Flash-0731 正式版）
     if "deepseek-v4" in text or (
         "deepseek" in text and ("v4-pro" in text or "v4-flash" in text or "v4_pro" in text)
     ):
@@ -38,14 +40,25 @@ def estimate_context_window(
     if provider == "deepseek" or "deepseek" in text:
         return 1_000_000
 
+    # Kimi K3：1M；K2 系列部分型号更高，统一按 1M~2M 保守取大
+    if "kimi-k3" in text or "kimi/k3" in text:
+        return 1_000_000
     if "kimi" in text or "moonshot" in text:
-        return 2_000_000
+        return 1_000_000
+
     if "minimax" in text:
+        return 1_000_000
+
+    # 千问 3.7/3.8 旗舰多为 1M
+    if "qwen3.8" in text or "qwen3.7" in text or "qwen3-coder-plus" in text:
         return 1_000_000
     if "qwen" in text or "dashscope" in text:
         return 256_000
+
     if "doubao" in text or "seed" in text:
         return 256_000
+    if "glm-5.2" in text or "glm-5" in text:
+        return 1_000_000
     if "glm" in text or "zhipu" in text:
         return 200_000
     if "ernie" in text or "speed-pro" in text:
@@ -83,21 +96,12 @@ PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://api.deepseek.com/v1",
         "api_key_env": "DEEPSEEK_API_KEY",
         "docs_url": "https://platform.deepseek.com/api_keys",
-        # 仅 V4；deepseek-chat / reasoner 将于 2026-07-24 下线
-        "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
+        # V4-Flash 正式版（0731）API 仍用 deepseek-v4-flash；Pro 同系列
+        "models": [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+        ],
         "context_window": 1_000_000,
-        "enable_thinking": True,
-        "region": "domestic",
-    },
-    {
-        "name": "zhipu",
-        "label": "智谱 GLM",
-        "adapter": "zhipu",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "api_key_env": "ZHIPU_API_KEY",
-        "docs_url": "https://open.bigmodel.cn/usercenter/apikeys",
-        "models": ["glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash"],
-        "context_window": 200_000,
         "enable_thinking": True,
         "region": "domestic",
     },
@@ -109,13 +113,16 @@ PROVIDER_PRESETS: list[dict] = [
         "api_key_env": "QWEN_API_KEY",
         "docs_url": "https://bailian.console.aliyun.com/?apiKey=1#/api-key",
         "models": [
+            "qwen3.8-max",
+            "qwen3.7-plus",
+            "qwen3.7-flash",
+            "qwen3.7-max",
             "qwen3-coder-plus",
             "qwen3-coder-next",
+            "qwen3-coder-flash",
             "qwen3.5-max",
-            "qwen3-max",
-            "qwen3-coder-480b-a35b-instruct",
         ],
-        "context_window": 256_000,
+        "context_window": 1_000_000,
         "enable_thinking": True,
         "region": "domestic",
     },
@@ -123,11 +130,35 @@ PROVIDER_PRESETS: list[dict] = [
         "name": "kimi",
         "label": "Kimi 月之暗面",
         "adapter": "kimi",
+        # 国内平台；国际站可用 https://api.moonshot.ai/v1
         "base_url": "https://api.moonshot.cn/v1",
         "api_key_env": "KIMI_API_KEY",
         "docs_url": "https://platform.moonshot.cn/console/api-keys",
-        "models": ["kimi-k2.6", "kimi-k2.5", "kimi-k2", "kimi-k2.7-code"],
-        "context_window": 2_000_000,
+        "models": [
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "kimi-k2.5",
+        ],
+        "context_window": 1_000_000,
+        "enable_thinking": True,
+        "region": "domestic",
+    },
+    {
+        "name": "zhipu",
+        "label": "智谱 GLM",
+        "adapter": "zhipu",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPU_API_KEY",
+        "docs_url": "https://open.bigmodel.cn/usercenter/apikeys",
+        "models": [
+            "glm-5.2",
+            "glm-5.1",
+            "glm-5",
+            "glm-4.7",
+            "glm-4.7-flash",
+        ],
+        "context_window": 1_000_000,
         "enable_thinking": True,
         "region": "domestic",
     },
@@ -138,7 +169,11 @@ PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
         "api_key_env": "ARK_API_KEY",
         "docs_url": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
-        "models": ["doubao-seed-2-0", "doubao-seed-1-8", "doubao-pro-1-5"],
+        "models": [
+            "doubao-seed-2-0",
+            "doubao-seed-1-8",
+            "doubao-pro-1-5",
+        ],
         "context_window": 256_000,
         "enable_thinking": True,
         "region": "domestic",
@@ -187,9 +222,10 @@ PROVIDER_PRESETS: list[dict] = [
         "api_key_env": "SILICONFLOW_API_KEY",
         "docs_url": "https://cloud.siliconflow.cn/account/ak",
         "models": [
-            "deepseek-ai/DeepSeek-V4-Pro",
             "deepseek-ai/DeepSeek-V4-Flash",
-            "Qwen/Qwen3-Coder-Next",
+            "deepseek-ai/DeepSeek-V4-Pro",
+            "moonshotai/Kimi-K3",
+            "Qwen/Qwen3.5-Max",
             "Pro/zai-org/GLM-5",
         ],
         "context_window": 128_000,
@@ -259,9 +295,11 @@ PROVIDER_PRESETS: list[dict] = [
         "api_key_env": "OPENROUTER_API_KEY",
         "docs_url": "https://openrouter.ai/keys",
         "models": [
+            "deepseek/deepseek-v4-flash",
             "deepseek/deepseek-v4-pro",
+            "moonshotai/kimi-k3",
+            "qwen/qwen3.8-max",
             "anthropic/claude-sonnet-4.5",
-            "openai/gpt-5.4",
         ],
         "context_window": 200_000,
         "enable_thinking": True,

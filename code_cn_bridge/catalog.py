@@ -81,10 +81,8 @@ def _build_model_entry(alias: str, item: dict[str, Any], template: dict[str, Any
         alias, target, provider_name, item.get("context_window")
     )
 
-    # 构建展示名称：alias + 真实模型信息
+    # 展示名称：直接使用用户配置的别名，不带括号后缀
     display_name = alias
-    if target and target != alias:
-        display_name = f"{alias} ({target})"
 
     # 输入模态
     input_modalities = ["text"]
@@ -405,7 +403,11 @@ def _pick_default_model(enabled_models: list[tuple[str, str, str]]) -> str | Non
     """选择默认模型（与 /codex-config 端点逻辑一致）"""
     if not enabled_models:
         return None
-    code_aliases = {"deepseek-v4", "gpt-5-code", "kimi-k2-7-code", "qwen3-coder-plus"}
+    code_aliases = {
+        "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4",
+        "gpt-5-code", "kimi-k3", "kimi-k2-7-code",
+        "qwen3.8-max", "qwen3-coder-plus", "qwen3.7-plus",
+    }
     for alias, _, _ in enabled_models:
         if alias in code_aliases:
             return alias
