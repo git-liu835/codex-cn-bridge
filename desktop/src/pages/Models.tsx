@@ -58,6 +58,7 @@ const Models: React.FC = () => {
   const [cardForm, setCardForm] = useState({
     provider: '', adapter: 'deepseek', base_url: '', api_key_env: '', api_key: '',
     alias: '', target: '', mtype: 'text' as ModelType,
+    planId: '',  // 计费方式（按量 / Coding Plan / Token Plan / Agent Plan）
   });
   const [modelForm, setModelForm] = useState({ ...EMPTY_FORM });
 
@@ -75,6 +76,10 @@ const Models: React.FC = () => {
     api_key_env: string; docs_url: string; models: string[];
     context_window?: number; enable_thinking?: boolean;
     region: 'domestic' | 'overseas' | 'local';
+    plans?: Array<{
+      id: string; label: string; base_url: string; api_key_env: string;
+      note?: string; models?: string[];
+    }>;
   }>>([]);
   const [selectedPresetName, setSelectedPresetName] = useState<string>('');
   const [switchingMode, setSwitchingMode] = useState(false);
@@ -102,18 +107,38 @@ const Models: React.FC = () => {
     setSelectedPresetName(name);
     const p = presets.find(x => x.name === name);
     if (p) {
+      const plan = p.plans?.[0];
       setCardForm(prev => ({
         ...prev,
         provider: p.name,
         adapter: p.adapter,
-        base_url: p.base_url,
-        api_key_env: p.api_key_env,
+        base_url: plan?.base_url || p.base_url,
+        api_key_env: plan?.api_key_env || p.api_key_env,
         target: p.models[0] || '',
         // alias 默认取 target 的简短名
         alias: prev.alias || p.models[0]?.split('/').pop()?.split(':').pop() || p.name,
+        planId: plan?.id || '',
       }));
     }
   };
+
+  // 切换计费方式：自动替换 base_url / api_key_env / 可选模型
+  const handlePlanChange = (planId: string) => {
+    const p = presets.find(x => x.name === selectedPresetName);
+    const plan = p?.plans?.find(pl => pl.id === planId);
+    setCardForm(prev => ({
+      ...prev,
+      planId,
+      base_url: plan?.base_url || prev.base_url,
+      api_key_env: plan?.api_key_env || prev.api_key_env,
+      // 套餐有专属模型列表时切换默认模型
+      target: plan?.models?.length ? plan.models[0] : prev.target,
+    }));
+  };
+
+  // 当前计费方式下的可选模型（套餐专属模型优先，否则用厂商全量）
+  const currentPlan = selectedPreset?.plans?.find(pl => pl.id === cardForm.planId);
+  const planModelOptions = currentPlan?.models?.length ? currentPlan.models : (selectedPreset?.models || []);
 
   // 切换 Codex 模式（官方/桥接器）
   const handleSwitchMode = async (target: 'official' | 'bridge') => {
@@ -209,7 +234,7 @@ const Models: React.FC = () => {
 
   // ═══ Card Form (Add Provider) ═════════════════
   const openCardForm = () => {
-    setCardForm({ provider: '', adapter: 'deepseek', base_url: '', api_key_env: '', api_key: '', alias: '', target: '', mtype: 'text' });
+    setCardForm({ provider: '', adapter: 'deepseek', base_url: '', api_key_env: '', api_key: '', alias: '', target: '', mtype: 'text', planId: '' });
     setSelectedPresetName('');
     setShowCardForm(true);
   };
@@ -375,7 +400,7 @@ const Models: React.FC = () => {
       )}
 
       {/* ── 厂商预设卡片网格（点击即可快速配置） ──── */}
-      {presets.length > 0 && (
+      {(
         <div className="preset-grid-section">
           <h3 className="preset-section-title">厂商快速配置</h3>
           <div className="preset-card-grid">
@@ -406,6 +431,24 @@ const Models: React.FC = () => {
                 </div>
               );
             })}
+
+            {/* 自定义卡片：任意 OpenAI 兼容 API（新出的模型也能配） */}
+            <div
+              className="preset-card region-custom"
+              onClick={() => { openCardForm(); setSelectedPresetName(''); setCardForm(prev => ({ ...prev, provider: '', adapter: 'qwen', base_url: '', api_key_env: '', alias: '', target: '' })); }}
+            >
+              <div className="preset-card-header">
+                <span className="preset-card-name">＋ 自定义模型</span>
+              </div>
+              <div className="preset-card-models">
+                <span className="preset-model-tag">任意 API 地址</span>
+                <span className="preset-model-tag">任意模型名</span>
+              </div>
+              <div className="preset-card-footer">
+                <span className="preset-region-tag region-custom">自定义</span>
+                <span className="preset-docs-link">OpenAI 兼容 →</span>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -710,6 +753,27 @@ const Models: React.FC = () => {
               </div>
             )}
 
+            {/* 步骤 1.5：计费方式（按量 / Coding Plan / Token Plan / Agent Plan） */}
+            {selectedPreset && (selectedPreset.plans?.length || 0) > 0 && (
+              <div className="form-group full-width" style={{ marginTop: 12 }}>
+                <label style={{ fontWeight: 600 }}>计费方式（地址与 Key 互不通用，请选对）</label>
+                <select value={cardForm.planId} onChange={e => handlePlanChange(e.target.value)}>
+                  {(selectedPreset.plans || []).map(pl => (
+                    <option key={pl.id} value={pl.id}>{pl.label}</option>
+                  ))}
+                </select>
+                {currentPlan?.note && (
+                  <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--text-muted)' }}>{currentPlan.note}</p>
+                )}
+                {currentPlan && (
+                  <div className="preset-info-row" style={{ marginTop: 4 }}>
+                    <span className="preset-info-label">API 地址：</span>
+                    <code style={{ fontSize: 11 }}>{currentPlan.base_url}</code>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* 步骤 2：填 API Key（唯一必填项） */}
             {selectedPreset && (
               <div className="form-grid" style={{ marginTop: 12 }}>
@@ -723,11 +787,51 @@ const Models: React.FC = () => {
               </div>
             )}
 
-            {/* 未选预设时的提示 */}
+            {/* 自定义模式：未选预设时自由填写（新出的模型也能配） */}
             {!selectedPreset && (
-              <p className="muted" style={{ fontSize: 13, marginTop: 12 }}>
-                选择服务商后，API 地址、适配器、默认模型都会自动填好，你只需要填 API Key。
-              </p>
+              <div className="form-grid" style={{ marginTop: 12 }}>
+                <div className="form-group">
+                  <label style={{ fontWeight: 600 }}>厂商名（provider）*</label>
+                  <input value={cardForm.provider}
+                    onChange={e => setCardForm({ ...cardForm, provider: e.target.value })}
+                    placeholder="my-new-model" />
+                </div>
+                <div className="form-group">
+                  <label style={{ fontWeight: 600 }}>API Key *</label>
+                  <input type="password" value={cardForm.api_key}
+                    onChange={e => setCardForm({ ...cardForm, api_key: e.target.value })}
+                    placeholder="粘贴你的 API Key" />
+                </div>
+                <div className="form-group full-width">
+                  <label style={{ fontWeight: 600 }}>API 地址（base_url）*</label>
+                  <input value={cardForm.base_url}
+                    onChange={e => setCardForm({ ...cardForm, base_url: e.target.value })}
+                    placeholder="https://api.example.com/v1" />
+                </div>
+                <div className="form-group">
+                  <label style={{ fontWeight: 600 }}>模型名（target）*</label>
+                  <input value={cardForm.target}
+                    onChange={e => setCardForm({ ...cardForm, target: e.target.value })}
+                    placeholder="新模型的真实模型 ID" />
+                </div>
+                <div className="form-group">
+                  <label>显示名（alias）</label>
+                  <input value={cardForm.alias}
+                    onChange={e => setCardForm({ ...cardForm, alias: e.target.value })}
+                    placeholder="留空则用模型名" />
+                </div>
+                <div className="form-group full-width">
+                  <label>模型类型</label>
+                  <select value={cardForm.mtype} onChange={e => setCardForm({ ...cardForm, mtype: e.target.value as ModelType })}>
+                    {(Object.keys(TYPE_LABELS) as ModelType[]).map(t => (
+                      <option key={t} value={t}>{typeLabel(t)}</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="muted" style={{ fontSize: 12, margin: '4px 0 0', gridColumn: '1 / -1' }}>
+                  适用于任意 OpenAI 兼容接口（含刚发布的新模型）。选上方厂商卡片则只需填 API Key。
+                </p>
+              </div>
             )}
 
             {/* 高级选项（可折叠）：模型名/显示名/类型 */}
@@ -741,7 +845,7 @@ const Models: React.FC = () => {
                       onChange={e => setCardForm({ ...cardForm, target: e.target.value })}
                       placeholder="deepseek-v4-pro" />
                     <datalist id="preset-models">
-                      {selectedPreset.models.map(m => <option key={m} value={m} />)}
+                      {planModelOptions.map(m => <option key={m} value={m} />)}
                     </datalist>
                   </div>
                   <div className="form-group">
@@ -764,7 +868,11 @@ const Models: React.FC = () => {
 
             <div className="modal-actions">
               <button className="btn" onClick={() => setShowCardForm(false)}>{tl('common.cancel')}</button>
-              <button className="btn btn-primary" onClick={handleAddCard} disabled={loading || !selectedPreset || !cardForm.api_key}>
+              <button
+                className="btn btn-primary"
+                onClick={handleAddCard}
+                disabled={loading || !cardForm.api_key || (selectedPreset ? false : (!cardForm.provider || !cardForm.base_url || !cardForm.target))}
+              >
                 {tl('common.save')}
               </button>
             </div>

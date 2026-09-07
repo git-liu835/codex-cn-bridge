@@ -151,6 +151,16 @@ export const api = {
         docs_url: string;
         models: string[];
         region: 'domestic' | 'overseas' | 'local';
+        context_window?: number;
+        enable_thinking?: boolean;
+        plans?: Array<{
+          id: string;
+          label: string;
+          base_url: string;
+          api_key_env: string;
+          note?: string;
+          models?: string[];
+        }>;
       }>;
     }>('/admin/api/provider-presets'),
 

@@ -146,16 +146,30 @@ input, select, textarea, button {
 }
 
 .header-brand { display: flex; align-items: center; gap: 10px; }
-.header-logo { font-size: 22px; color: var(--accent); }
+.header-logo-img {
+  height: 30px; width: auto;
+  border-radius: 7px;
+  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.35));
+}
 .header-title { font-size: 15px; font-weight: 600; letter-spacing: 0.3px; }
-.header-status { display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
+.header-status {
+  display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag;
+  padding: 4px 12px; border-radius: 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
 
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%;
   display: inline-block;
 }
-.status-dot.running { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.status-dot.running { background: var(--success); box-shadow: 0 0 6px var(--success); animation: pulse 2s infinite; }
 .status-dot.stopped { background: var(--text-muted); }
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 4px var(--success); }
+  50% { box-shadow: 0 0 10px var(--success); }
+}
 
 /* ═══════ Body = Sidebar + Content ═══════ */
 
@@ -171,17 +185,23 @@ input, select, textarea, button {
 }
 
 .nav-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 16px;
+  display: flex; align-items: center; gap: 10px;
+  margin: 2px 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
   color: var(--text-secondary);
   text-decoration: none;
   font-size: 13px;
   transition: all 0.15s;
-  border-left: 2px solid transparent;
+  border-left: none;
 }
 .nav-item:hover { color: var(--text-primary); background: var(--bg-hover); }
-.nav-item.active { color: var(--accent); background: var(--bg-card); border-left-color: var(--accent); }
-.nav-icon { font-size: 14px; width: 16px; text-align: center; }
+.nav-item.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-weight: 600;
+}
+.nav-icon { width: 17px; height: 17px; flex-shrink: 0; }
 
 .content {
   flex: 1; overflow-y: auto;
@@ -197,8 +217,15 @@ input, select, textarea, button {
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 12px;
   padding: 20px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.28);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
 }
 .card h3 { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
 
@@ -251,13 +278,22 @@ input, select, textarea, button {
 .btn {
   padding: 8px 16px; border: 1px solid var(--border);
   background: var(--bg-input); color: var(--text-primary);
-  border-radius: 6px; cursor: pointer; font-size: 13px;
+  border-radius: 8px; cursor: pointer; font-size: 13px;
   transition: all 0.15s;
+  font-weight: 500;
 }
 .btn:hover { background: var(--bg-hover); }
+.btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  border-color: transparent; color: #fff;
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.btn-primary:hover {
+  background: linear-gradient(135deg, var(--accent-hover), var(--accent));
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 55%, transparent);
+}
 .btn-outline { background: transparent; border-color: var(--accent); color: var(--accent); }
 .btn-outline:hover { background: rgba(91,141,239,0.1); }
 .btn-danger { color: var(--error); }
@@ -1217,6 +1253,8 @@ input, select, textarea, button {
 .preset-card.region-domestic { border-left: 3px solid #1677ff; }
 .preset-card.region-overseas { border-left: 3px solid #722ed1; }
 .preset-card.region-local    { border-left: 3px solid #52c41a; }
+.preset-card.region-custom   { border-left: 3px solid #fa8c16; border-style: dashed; }
+.preset-region-tag.region-custom { background: #fff7e6; color: #d46b08; border: 1px solid #ffd591; }
 
 .preset-card-header {
   display: flex;
@@ -1304,4 +1342,60 @@ input, select, textarea, button {
 
 .preset-card:hover .preset-docs-link {
   color: var(--accent);
+}
+
+/* ═══════ 全局美化 ═══════ */
+
+/* 自定义滚动条 */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted) 40%, transparent);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-muted) 65%, transparent);
+  background-clip: content-box;
+}
+
+/* 健康卡片悬停 */
+.health-card { transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease; }
+.health-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 5px 16px rgba(0,0,0,0.25);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+/* 页面标题 */
+.page h2 {
+  position: relative;
+  padding-left: 14px;
+}
+.page h2::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 50%;
+  transform: translateY(-50%);
+  width: 4px; height: 20px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-hover));
+}
+
+/* 内容区深度感 */
+.content {
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, color-mix(in srgb, var(--accent) 5%, transparent), transparent),
+    var(--bg-primary);
+}
+
+/* 表格行悬停 */
+.data-table tbody tr { transition: background 0.12s ease; }
+.data-table tbody tr:hover { background: var(--bg-hover); }
+
+/* 输入框聚焦光晕 */
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }

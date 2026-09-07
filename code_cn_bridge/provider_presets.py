@@ -57,6 +57,12 @@ def estimate_context_window(
 
     if "doubao" in text or "seed" in text:
         return 256_000
+    # 混元 Hy4/Hy3：1M 上下文
+    if "hy4" in text or "hy3" in text:
+        return 1_000_000
+    # 星火 X2.5：256K
+    if "spark-x2" in text:
+        return 256_000
     if "glm-5.2" in text or "glm-5" in text:
         return 1_000_000
     if "glm" in text or "zhipu" in text:
@@ -152,15 +158,31 @@ PROVIDER_PRESETS: list[dict] = [
         "api_key_env": "ZHIPU_API_KEY",
         "docs_url": "https://open.bigmodel.cn/usercenter/apikeys",
         "models": [
+            "glm-5.3",
+            "glm-5.3-flash",
             "glm-5.2",
             "glm-5.1",
             "glm-5",
-            "glm-4.7",
-            "glm-4.7-flash",
         ],
         "context_window": 1_000_000,
         "enable_thinking": True,
         "region": "domestic",
+        "plans": [
+            {
+                "id": "payg",
+                "label": "按量付费 API",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "api_key_env": "ZHIPU_API_KEY",
+                "note": "智谱开放平台 Key",
+            },
+            {
+                "id": "coding",
+                "label": "GLM Coding Plan（包月）",
+                "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+                "api_key_env": "ZHIPU_CODING_API_KEY",
+                "note": "Coding Plan Key（个人版/团队版 Key 不通用）",
+            },
+        ],
     },
     {
         "name": "doubao",
@@ -197,9 +219,52 @@ PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
         "api_key_env": "HUNYUAN_API_KEY",
         "docs_url": "https://console.cloud.tencent.com/hunyuan/api-key",
-        "models": ["hunyuan-turbos-latest", "hunyuan-t1-latest"],
-        "context_window": 256_000,
-        "enable_thinking": False,
+        "models": ["hy4-preview", "hy3", "hunyuan-turbos-latest"],
+        "context_window": 1_000_000,
+        "enable_thinking": True,
+        "region": "domestic",
+        "plans": [
+            {
+                "id": "payg",
+                "label": "按量付费 API",
+                "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
+                "api_key_env": "HUNYUAN_API_KEY",
+                "note": "混元开放平台 Key",
+            },
+            {
+                "id": "token_plan",
+                "label": "Token Plan（个人版）",
+                "base_url": "https://api.lkeap.cloud.tencent.com/plan/v3",
+                "api_key_env": "TENCENT_TOKEN_PLAN_API_KEY",
+                "note": "Token Plan 专属 Key；模型：hy4-preview/hy3/hunyuan 系列",
+            },
+            {
+                "id": "coding",
+                "label": "Coding Plan（包月）",
+                "base_url": "https://api.lkeap.cloud.tencent.com/coding/v3",
+                "api_key_env": "TENCENT_CODING_API_KEY",
+                "note": "Coding Plan 专属 Key",
+            },
+        ],
+    },
+    {
+        "name": "tokenhub",
+        "label": "腾讯云 TokenHub 聚合",
+        "adapter": "qwen",  # OpenAI 兼容透传，一个 Key 用多家模型
+        "base_url": "https://tokenhub.tencentmaas.com/v1",
+        "api_key_env": "TOKENHUB_API_KEY",
+        "docs_url": "https://console.cloud.tencent.com/tokenhub/apikey",
+        "models": [
+            "auto",
+            "glm-5.3-flash",
+            "kimi-k3",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "minimax-m3",
+            "hy4-preview",
+        ],
+        "context_window": 1_000_000,
+        "enable_thinking": True,
         "region": "domestic",
     },
     {
@@ -239,9 +304,9 @@ PROVIDER_PRESETS: list[dict] = [
         "base_url": "https://spark-api-open.xf-yun.com/v1",
         "api_key_env": "SPARK_API_KEY",
         "docs_url": "https://console.xfyun.cn/services/bm4",
-        "models": ["generalv3.5", "4.0Ultra", "max-32k"],
-        "context_window": 128_000,
-        "enable_thinking": False,
+        "models": ["spark-x2.5", "generalv3.5", "4.0Ultra"],
+        "context_window": 256_000,
+        "enable_thinking": True,
         "region": "domestic",
     },
     {
@@ -329,6 +394,18 @@ def list_presets_public() -> list[dict]:
             "context_window": p.get("context_window", DEFAULT_CONTEXT_WINDOW),
             "enable_thinking": p.get("enable_thinking", True),
             "region": p.get("region", "domestic"),
+            # 计费方式（按量 / Coding Plan / Token Plan / Agent Plan）
+            "plans": [
+                {
+                    "id": pl.get("id", "payg"),
+                    "label": pl.get("label", ""),
+                    "base_url": pl.get("base_url", ""),
+                    "api_key_env": pl.get("api_key_env", ""),
+                    "note": pl.get("note", ""),
+                    "models": list(pl.get("models", [])),
+                }
+                for pl in p.get("plans", [])
+            ],
         }
         for p in PROVIDER_PRESETS
     ]

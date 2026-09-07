@@ -1,10 +1,24 @@
-"""通义千问 (Qwen) 适配器 —— 支持 Qwen3.7-Max / Qwen3.7-Plus / Qwen3-Coder-Plus
+"""通义千问 (Qwen) 适配器 —— 支持 Qwen3.8-Max / Qwen3.7-Max / Qwen3.7-Plus / Qwen3.6-Flash / Qwen3-Coder-Plus
+
+Qwen3.8-Max-Preview (2026-06):
+  - 最新旗舰预览版, 1M 上下文
+  - 混合推理模型: 支持 thinking 开关 + thinking_budget
+  - 多模态: 支持视觉理解
 
 Qwen3.7-Max (2026-05):
   - 1M 上下文, 64K max_output
   - 混合推理模型: 支持 thinking 开关, 有 thinking_budget (上限 256K)
   - 控制参数: enable_thinking: true/false + thinking_budget: N
   - 思考 token 计入输出计费
+
+Qwen3.7-Plus / Qwen3.6-Flash:
+  - 多模态: 支持视觉理解 (图片+视频)
+  - 混合推理: 支持 enable_thinking + thinking_budget
+  - Plus: 次旗舰, 性价比高
+  - Flash: 轻量快速, 成本最低
+
+Qwen3-Coder-Plus:
+  - 专业编程模型, 支持 thinking
 """
 
 from __future__ import annotations

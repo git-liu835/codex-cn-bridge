@@ -1,6 +1,16 @@
-"""Moonshot (Kimi) 适配器 —— 支持 K2.7-Code / K2.6 / K2.5
+"""Moonshot (Kimi) 适配器 —— 支持 K3 / K2.7-Code / K2.6 / K2.5
 
-Kimi K2.7-Code (2026-06-12):
+Kimi K3 (2026-07):
+  - 2.8T total MoE, 896 experts, 16 active
+  - 上下文: 1M tokens, max_completion_tokens 默认 131072, 最大 1048576
+  - thinking: ALWAYS ON — 无法关闭, 通过 reasoning_effort 控制力度
+  - reasoning_effort: "low" | "high" | "max" (默认 "max")
+  - 原生支持视觉理解 (多模态)
+  - 固定参数: temperature=1.0, top_p=0.95, n=1 (不要显式传入)
+  - 不支持 thinking: {type: ...} 格式, 不支持 budget_tokens
+  - 不支持 preserve_thinking
+
+Kimi K2.7-Code / K2.7-Code-Highspeed (2026-06):
   - 1T total MoE, 32B active, 384 experts
   - 上下文: 262K tokens
   - thinking: FORCED ON — 无法关闭
@@ -26,21 +36,82 @@ class KimiAdapter(BaseAdapter):
     api_key_env = "KIMI_API_KEY"
     unsupported_features: set[str] = set()
     supports_thinking_budget: bool = False  # Kimi 不支持 budget_tokens
-    thinking_mode: str = "forced"  # K2.7 Code 强制开启
+    thinking_mode: str = "forced"  # K2.7 Code / K3 强制开启
 
     capabilities: dict[str, bool | int] = {
         "tools": True,
         "streaming": True,
         "reasoning": True,
-        "vision": False,
+        "vision": True,   # K3 / K2.6 / K2.5 支持视觉
         "image_gen": False,
         "video_gen": False,
         "code_execution": False,
         "max_tokens": 8192,
     }
 
+    # K3 模型标识前缀
+    _K3_PREFIXES = ("kimi-k3",)
+
+    def _is_k3(self, chat_req: dict) -> bool:
+        """判断当前请求是否使用 K3 模型"""
+        model = chat_req.get("model", "")
+        return any(model.startswith(p) for p in self._K3_PREFIXES)
+
     def apply_thinking(self, chat_req: dict) -> dict:
-        """Kimi K2.7 Code: thinking 强制开启, API 拒绝 disabled
+        """根据模型版本应用思考配置
+
+        K3: 使用 reasoning_effort (low/high/max), 始终开启思考
+        K2.7 Code: thinking 强制开启, API 拒绝 disabled
+        K2.6/K2.5: thinking 可开关
+        """
+        if self._is_k3(chat_req):
+            return self._apply_thinking_k3(chat_req)
+        return self._apply_thinking_k2(chat_req)
+
+    def _apply_thinking_k3(self, chat_req: dict) -> dict:
+        """Kimi K3: 使用 reasoning_effort 控制思考力度
+
+        effort 映射:
+          _thinking_budget <= 1024  → reasoning_effort: "low"
+          _thinking_budget <= 8192  → reasoning_effort: "high"
+          _thinking_budget > 8192   → reasoning_effort: "max"
+
+        K3 固定参数: temperature=1.0, top_p=0.95, n=1
+        不应显式传入这些参数，移除它们。
+        """
+        # K3 始终开启思考，移除 disable 标记
+        chat_req.pop("_disable_thinking", None)
+        budget = chat_req.pop("_thinking_budget", 4096)
+
+        # 映射 budget → reasoning_effort
+        if budget <= 1024:
+            effort = "low"
+        elif budget <= 8192:
+            effort = "high"
+        else:
+            effort = "max"
+        chat_req["reasoning_effort"] = effort
+
+        # K3 不支持 thinking 对象格式，移除可能残留的字段
+        chat_req.pop("thinking", None)
+        chat_req.pop("preserve_thinking", None)
+
+        # K3 固定参数，移除显式传入的值
+        chat_req.pop("temperature", None)
+        chat_req.pop("top_p", None)
+        chat_req.pop("n", None)
+        chat_req.pop("presence_penalty", None)
+        chat_req.pop("frequency_penalty", None)
+
+        # K3 max_completion_tokens 默认 131072
+        cur_max = chat_req.get("max_tokens", 0)
+        if not cur_max or cur_max < 16384:
+            chat_req["max_tokens"] = 131072
+
+        return chat_req
+
+    def _apply_thinking_k2(self, chat_req: dict) -> dict:
+        """Kimi K2.7 Code / K2.6: thinking 强制开启
 
         effort 映射 (仅影响 max_tokens 兜底值, 不影响 thinking 状态):
           low    → max_tokens: budget + 12288
