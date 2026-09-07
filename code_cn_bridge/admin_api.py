@@ -38,7 +38,7 @@ async def get_status():
         "running": True,
         "host": cfg.server_host,
         "port": cfg.server_port,
-        "version": "0.6.5",
+        "version": "0.6.6",
         "stats": stats.get_summary(),
     }
 
@@ -527,7 +527,7 @@ async def test_connection(alias: str, data: dict | None = None):
 
         # 构建测试请求头（加 User-Agent 避免 WAF 拦截）
         headers = adapter.get_headers(api_key)
-        headers.setdefault("User-Agent", "code-cn-bridge/0.6.5")
+        headers.setdefault("User-Agent", "code-cn-bridge/0.6.6")
         # 应用 provider 配置的 extra_headers
         for k, v in (provider.get("extra_headers") or {}).items():
             headers[k] = v
